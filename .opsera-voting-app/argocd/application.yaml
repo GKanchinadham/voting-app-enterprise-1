@@ -14,7 +14,7 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: default
+  project: voting-app
 
   source:
     repoURL: https://github.com/GKanchinadham/voting-app-enterprise-1.git
