@@ -8,6 +8,7 @@ resources:
   - vote-rollout.yaml
   - result-rollout.yaml
   - analysis-template.yaml
+  - analysis-template-http.yaml  # Fallback when Prometheus is not available
 
 commonLabels:
   app.kubernetes.io/part-of: voting-app

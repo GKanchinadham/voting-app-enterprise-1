@@ -1,0 +1,173 @@
+# ============================================================================
+# HTTP-Based Analysis Template (No Prometheus Required)
+# ============================================================================
+# Use this template when Prometheus is not available in your cluster.
+# It performs simple HTTP health checks instead of metrics-based analysis.
+# 
+# To use: Update the rollout to reference 'http-health-check' instead of 'success-rate'
+# ============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: http-health-check
+  labels:
+    app.kubernetes.io/part-of: voting-app
+    analysis-type: http-based
+spec:
+  args:
+  - name: service-name
+  - name: namespace
+    value: "voting-app-qa"  # Default, can be overridden
+  
+  metrics:
+  # ─────────────────────────────────────────────────────────────────────────
+  # METRIC 1: HTTP Health Check
+  # Verifies the service endpoint returns HTTP 200
+  # ─────────────────────────────────────────────────────────────────────────
+  - name: http-health
+    interval: 30s
+    count: 5
+    successCondition: result.status == 200
+    failureLimit: 3
+    provider:
+      web:
+        url: "http://{{args.service-name}}.{{args.namespace}}.svc.cluster.local/"
+        method: GET
+        timeoutSeconds: 10
+        headers:
+        - key: "User-Agent"
+          value: "Argo-Rollouts-Analysis"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # METRIC 2: Response Time Check
+  # Verifies response time is under threshold (measured via job duration)
+  # ─────────────────────────────────────────────────────────────────────────
+  - name: response-time
+    interval: 30s
+    count: 5
+    # Job provider runs a command and checks exit code
+    # curl --max-time enforces response time limit
+    successCondition: result.exitCode == 0
+    failureLimit: 2
+    provider:
+      job:
+        spec:
+          backoffLimit: 0
+          template:
+            spec:
+              restartPolicy: Never
+              containers:
+              - name: curl
+                image: curlimages/curl:8.5.0
+                command:
+                - /bin/sh
+                - -c
+                - |
+                  # Fail if response takes more than 2 seconds
+                  curl -sf --max-time 2 \
+                    "http://{{args.service-name}}.{{args.namespace}}.svc.cluster.local/" \
+                    -o /dev/null
+                  exit $?
+
+---
+# ============================================================================
+# Kubernetes Job-Based Analysis Template
+# ============================================================================
+# More advanced analysis using custom scripts
+# ============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: custom-health-check
+  labels:
+    app.kubernetes.io/part-of: voting-app
+    analysis-type: job-based
+spec:
+  args:
+  - name: service-name
+  - name: namespace
+    value: "voting-app-qa"
+  - name: expected-status
+    value: "200"
+  - name: max-latency-ms
+    value: "500"
+  
+  metrics:
+  - name: comprehensive-check
+    interval: 60s
+    count: 3
+    successCondition: result.exitCode == 0
+    failureLimit: 2
+    provider:
+      job:
+        spec:
+          backoffLimit: 0
+          template:
+            spec:
+              restartPolicy: Never
+              containers:
+              - name: health-checker
+                image: curlimages/curl:8.5.0
+                env:
+                - name: SERVICE_URL
+                  value: "http://{{args.service-name}}.{{args.namespace}}.svc.cluster.local/"
+                - name: EXPECTED_STATUS
+                  value: "{{args.expected-status}}"
+                - name: MAX_LATENCY_MS
+                  value: "{{args.max-latency-ms}}"
+                command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "=== Canary Health Check ==="
+                  echo "Service: $SERVICE_URL"
+                  echo "Expected Status: $EXPECTED_STATUS"
+                  echo "Max Latency: ${MAX_LATENCY_MS}ms"
+                  echo ""
+                  
+                  # Perform multiple checks
+                  PASS_COUNT=0
+                  FAIL_COUNT=0
+                  TOTAL_CHECKS=5
+                  
+                  for i in $(seq 1 $TOTAL_CHECKS); do
+                    echo "Check $i/$TOTAL_CHECKS:"
+                    
+                    # Measure response time and status
+                    START=$(date +%s%3N)
+                    HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+                      --max-time 5 "$SERVICE_URL" 2>/dev/null || echo "000")
+                    END=$(date +%s%3N)
+                    LATENCY=$((END - START))
+                    
+                    echo "  Status: $HTTP_CODE, Latency: ${LATENCY}ms"
+                    
+                    # Check status
+                    if [ "$HTTP_CODE" != "$EXPECTED_STATUS" ]; then
+                      echo "  ❌ Status mismatch (expected $EXPECTED_STATUS)"
+                      FAIL_COUNT=$((FAIL_COUNT + 1))
+                    elif [ "$LATENCY" -gt "$MAX_LATENCY_MS" ]; then
+                      echo "  ❌ Latency exceeded (max ${MAX_LATENCY_MS}ms)"
+                      FAIL_COUNT=$((FAIL_COUNT + 1))
+                    else
+                      echo "  ✅ Passed"
+                      PASS_COUNT=$((PASS_COUNT + 1))
+                    fi
+                    
+                    sleep 2
+                  done
+                  
+                  echo ""
+                  echo "=== Summary ==="
+                  echo "Passed: $PASS_COUNT/$TOTAL_CHECKS"
+                  echo "Failed: $FAIL_COUNT/$TOTAL_CHECKS"
+                  
+                  # Require at least 80% success rate
+                  MIN_PASS=$((TOTAL_CHECKS * 4 / 5))
+                  if [ "$PASS_COUNT" -ge "$MIN_PASS" ]; then
+                    echo "✅ Overall: PASS"
+                    exit 0
+                  else
+                    echo "❌ Overall: FAIL"
+                    exit 1
+                  fi
