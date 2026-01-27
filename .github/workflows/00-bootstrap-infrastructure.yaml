@@ -175,9 +175,7 @@ jobs:
         run: |
           aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
 
-      - name: Setup ArgoCD Repository Secret (Idempotent)
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
+      - name: Setup ArgoCD Repository (Public Repo - No Auth Needed)
         run: |
           REPO_URL="${{ github.server_url }}/${{ github.repository }}.git"
           SECRET_NAME="repo-${{ env.APP_NAME }}"
@@ -185,21 +183,18 @@ jobs:
           echo "## 🔄 ArgoCD Configuration" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          # Always delete and recreate to ensure correct URL
+          # For PUBLIC repos, DELETE any existing repo secret to avoid auth issues
+          # ArgoCD can access public repos without authentication
           if kubectl get secret "$SECRET_NAME" -n argocd &>/dev/null; then
             kubectl delete secret "$SECRET_NAME" -n argocd
-            echo "| Repository Secret | 🔄 Deleted old secret |" >> $GITHUB_STEP_SUMMARY
+            echo "| Repository Secret | 🗑️ Deleted (public repo - no auth needed) |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Repository Secret | ✅ None needed (public repo) |" >> $GITHUB_STEP_SUMMARY
           fi
           
-          kubectl create secret generic "$SECRET_NAME" -n argocd \
-            --from-literal=type=git \
-            --from-literal=url="$REPO_URL" \
-            --from-literal=password="$GH_PAT" \
-            --from-literal=username="git"
-          kubectl label secret "$SECRET_NAME" -n argocd argocd.argoproj.io/secret-type=repository
-          echo "| Repository Secret | ✅ Created for ${REPO_URL} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Repository URL | ${REPO_URL} |" >> $GITHUB_STEP_SUMMARY
           
-          # Restart ArgoCD repo-server to clear cached credentials (AKS-L014)
+          # Restart ArgoCD repo-server to clear any cached credentials
           echo "| ArgoCD Repo Server | 🔄 Restarting to clear cache |" >> $GITHUB_STEP_SUMMARY
           kubectl rollout restart deployment argocd-repo-server -n argocd
           kubectl rollout status deployment argocd-repo-server -n argocd --timeout=120s
