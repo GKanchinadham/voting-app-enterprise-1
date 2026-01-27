@@ -10,7 +10,7 @@ kind: Deployment
 metadata:
   name: result
 spec:
-  replicas: 2
+  replicas: 1  # Single replica for socket.io session affinity
 ---
 apiVersion: apps/v1
 kind: Deployment
