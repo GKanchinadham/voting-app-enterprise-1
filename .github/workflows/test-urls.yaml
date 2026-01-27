@@ -1,0 +1,19 @@
+name: "Quick URL Test"
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test URLs
+        run: |
+          echo "Testing Vote URL..."
+          VOTE_STATUS=$(curl -s -k -o /dev/null -w "%{http_code}" https://opsera-voting-app-dev.agent.opsera.dev/)
+          echo "Vote Status: $VOTE_STATUS"
+          
+          echo "Testing Results URL..."
+          RESULTS_STATUS=$(curl -s -k -o /dev/null -w "%{http_code}" https://opsera-voting-app-dev.agent.opsera.dev/results)
+          echo "Results Status: $RESULTS_STATUS"
+          
+          echo "Results Response:"
+          curl -s -k https://opsera-voting-app-dev.agent.opsera.dev/results | head -20
