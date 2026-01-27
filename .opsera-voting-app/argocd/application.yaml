@@ -7,6 +7,10 @@ metadata:
     app.kubernetes.io/name: voting-app
     app.kubernetes.io/part-of: voting-app
     environment: dev
+  annotations:
+    notifications.argoproj.io/subscribe.on-sync-succeeded.slack: deployments
+    notifications.argoproj.io/subscribe.on-sync-failed.slack: deployments
+    notifications.argoproj.io/subscribe.on-health-degraded.slack: alerts
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
@@ -46,9 +50,3 @@ spec:
       jsonPointers:
         - /spec/volumeClaimTemplates/0/apiVersion
         - /spec/volumeClaimTemplates/0/kind
-
-  # Notifications for deployment events
-  annotations:
-    notifications.argoproj.io/subscribe.on-sync-succeeded.slack: deployments
-    notifications.argoproj.io/subscribe.on-sync-failed.slack: deployments
-    notifications.argoproj.io/subscribe.on-health-degraded.slack: alerts
