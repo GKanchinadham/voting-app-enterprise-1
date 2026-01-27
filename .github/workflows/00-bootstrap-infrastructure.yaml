@@ -197,6 +197,17 @@ jobs:
             echo "| Repository Secret | 🆕 Created |" >> $GITHUB_STEP_SUMMARY
           fi
 
+      - name: Setup ArgoCD Project (Idempotent)
+        run: |
+          PROJECT_MANIFEST=".opsera-${{ env.APP_NAME }}/argocd/project.yaml"
+          
+          if [ -f "$PROJECT_MANIFEST" ]; then
+            kubectl apply -f "$PROJECT_MANIFEST"
+            echo "| ArgoCD Project | ✅ Applied |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| ArgoCD Project | ⚠️ Not found |" >> $GITHUB_STEP_SUMMARY
+          fi
+
       - name: Setup ArgoCD Applications (Idempotent)
         run: |
           ENVS="${{ github.event.inputs.environment }}"
