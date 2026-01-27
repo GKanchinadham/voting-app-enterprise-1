@@ -1,0 +1,114 @@
+name: "ArgoCD - Force Sync"
+
+on:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-west-2
+  HUB_CLUSTER: argocd-usw2
+  APP_NAME: voting-app-dev
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  force-sync:
+    name: "Force ArgoCD Sync"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+
+      - name: Connect to Hub Cluster
+        run: |
+          aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
+
+      - name: Hard Refresh Application
+        run: |
+          echo "## ArgoCD Hard Refresh" >> $GITHUB_STEP_SUMMARY
+
+          # Trigger hard refresh
+          kubectl patch application ${{ env.APP_NAME }} -n argocd \
+            --type=merge \
+            -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
+
+          echo "Hard refresh triggered" >> $GITHUB_STEP_SUMMARY
+          sleep 10
+
+      - name: Force Sync
+        run: |
+          echo "## Force Sync" >> $GITHUB_STEP_SUMMARY
+
+          # Trigger sync operation
+          kubectl patch application ${{ env.APP_NAME }} -n argocd \
+            --type=merge \
+            -p '{"operation":{"initiatedBy":{"username":"github-actions"},"sync":{"prune":true,"selfHeal":true}}}'
+
+          echo "Sync operation triggered" >> $GITHUB_STEP_SUMMARY
+
+      - name: Wait for Sync
+        run: |
+          echo "## Sync Status" >> $GITHUB_STEP_SUMMARY
+
+          MAX_ATTEMPTS=30
+          ATTEMPT=1
+
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            SYNC_STATUS=$(kubectl get application ${{ env.APP_NAME }} -n argocd \
+              -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+
+            HEALTH_STATUS=$(kubectl get application ${{ env.APP_NAME }} -n argocd \
+              -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Unknown")
+
+            OPERATION_PHASE=$(kubectl get application ${{ env.APP_NAME }} -n argocd \
+              -o jsonpath='{.status.operationState.phase}' 2>/dev/null || echo "None")
+
+            echo "[$ATTEMPT/$MAX_ATTEMPTS] Sync: ${SYNC_STATUS}, Health: ${HEALTH_STATUS}, Operation: ${OPERATION_PHASE}"
+
+            if [ "$SYNC_STATUS" = "Synced" ] && [ "$OPERATION_PHASE" != "Running" ]; then
+              echo "Sync complete!" >> $GITHUB_STEP_SUMMARY
+              break
+            fi
+
+            sleep 5
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "Final Status:" >> $GITHUB_STEP_SUMMARY
+          echo "  Sync: ${SYNC_STATUS}" >> $GITHUB_STEP_SUMMARY
+          echo "  Health: ${HEALTH_STATUS}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Show Resources
+        run: |
+          echo "## Application Resources" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl get application ${{ env.APP_NAME }} -n argocd \
+            -o jsonpath='{range .status.resources[*]}{.kind}/{.name}: {.status} ({.health.status}){"\n"}{end}' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Test Results URL
+        run: |
+          echo "## URL Tests" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          echo "Vote URL (/):"
+          curl -s -k -o /dev/null -w "  Status: %{http_code}\n" https://opsera-voting-app-dev.agent.opsera.dev/ >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Results URL (/results):"
+          curl -s -k -o /dev/null -w "  Status: %{http_code}\n" https://opsera-voting-app-dev.agent.opsera.dev/results >> $GITHUB_STEP_SUMMARY
+
+          echo '```' >> $GITHUB_STEP_SUMMARY
