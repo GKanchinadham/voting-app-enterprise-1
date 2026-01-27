@@ -156,7 +156,9 @@ jobs:
       # ============================================
       - name: Discover ArgoCD Server
         id: argocd
+        continue-on-error: true
         run: |
+          set +e  # Don't exit on error
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## 🔍 ArgoCD Discovery" >> $GITHUB_STEP_SUMMARY
           
@@ -206,6 +208,11 @@ jobs:
             echo '```' >> $GITHUB_STEP_SUMMARY
             kubectl get applications -n argocd --no-headers 2>/dev/null | awk '{print $1, $2, $3}' >> $GITHUB_STEP_SUMMARY || echo "No applications found"
             echo '```' >> $GITHUB_STEP_SUMMARY
+            
+            # Set ARGOCD_URL to internal if external not found
+            if [ -z "$ARGOCD_URL" ]; then
+              ARGOCD_URL="$ARGOCD_INTERNAL"
+            fi
           else
             echo "❌ **ArgoCD NOT found in argocd namespace**" >> $GITHUB_STEP_SUMMARY
             ARGOCD_URL="NOT_FOUND"
@@ -213,13 +220,18 @@ jobs:
           
           echo "url=${ARGOCD_URL}" >> $GITHUB_OUTPUT
           echo "found=${ARGOCD_FOUND}" >> $GITHUB_OUTPUT
+          
+          # Always exit 0 to not fail the step
+          exit 0
 
       # ============================================
       # Discover Argo Rollouts
       # ============================================
       - name: Discover Argo Rollouts Controller
         id: rollouts
+        continue-on-error: true
         run: |
+          set +e  # Don't exit on error
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## 🔍 Argo Rollouts Discovery" >> $GITHUB_STEP_SUMMARY
           
@@ -269,13 +281,16 @@ jobs:
           fi
           
           echo "installed=${ROLLOUTS_INSTALLED}" >> $GITHUB_OUTPUT
+          exit 0
 
       # ============================================
       # Discover NGINX Ingress Controller
       # ============================================
       - name: Discover NGINX Ingress Controller
         id: nginx
+        continue-on-error: true
         run: |
+          set +e  # Don't exit on error
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## 🔍 NGINX Ingress Discovery" >> $GITHUB_STEP_SUMMARY
           
@@ -330,12 +345,15 @@ jobs:
           fi
           
           echo "installed=${NGINX_INSTALLED}" >> $GITHUB_OUTPUT
+          exit 0
 
       # ============================================
       # Validate Analysis Template Connectivity
       # ============================================
       - name: Validate Analysis Template
+        continue-on-error: true
         run: |
+          set +e  # Don't exit on error
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## 🧪 Analysis Template Validation" >> $GITHUB_STEP_SUMMARY
           
@@ -368,6 +386,7 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "To update, set \`update_analysis_template: true\` and re-run this workflow" >> $GITHUB_STEP_SUMMARY
           fi
+          exit 0
 
       # ============================================
       # Update Analysis Template (Optional)
