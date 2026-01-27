@@ -1,0 +1,202 @@
+name: "Generate Traffic for Canary Testing"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'qa'
+        type: choice
+        options:
+          - qa
+      target:
+        description: 'Target service'
+        required: true
+        default: 'vote'
+        type: choice
+        options:
+          - vote
+          - result
+          - both
+      duration:
+        description: 'Duration in seconds'
+        required: true
+        default: '120'
+        type: string
+      requests_per_second:
+        description: 'Requests per second'
+        required: true
+        default: '10'
+        type: string
+      include_votes:
+        description: 'Submit actual votes (for vote service)'
+        required: false
+        default: 'true'
+        type: boolean
+
+env:
+  AWS_REGION: us-west-2
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  generate-traffic:
+    name: "Generate Traffic - ${{ github.event.inputs.environment }}"
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Setup
+        run: |
+          echo "## Traffic Generator" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ github.event.inputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Target | ${{ github.event.inputs.target }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Duration | ${{ github.event.inputs.duration }}s |" >> $GITHUB_STEP_SUMMARY
+          echo "| RPS | ${{ github.event.inputs.requests_per_second }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Determine URLs
+        id: urls
+        run: |
+          ENV="${{ github.event.inputs.environment }}"
+          
+          case "$ENV" in
+            qa)
+              VOTE_URL="https://opsera-voting-app-qa.agent.opsera.dev"
+              RESULT_URL="https://results.opsera-voting-app-qa.agent.opsera.dev"
+              ;;
+            dev)
+              VOTE_URL="https://opsera-voting-app.agent.opsera.dev"
+              RESULT_URL="https://results.opsera-voting-app.agent.opsera.dev"
+              ;;
+            *)
+              VOTE_URL="https://opsera-voting-app-${ENV}.agent.opsera.dev"
+              RESULT_URL="https://results.opsera-voting-app-${ENV}.agent.opsera.dev"
+              ;;
+          esac
+          
+          echo "vote_url=$VOTE_URL" >> $GITHUB_OUTPUT
+          echo "result_url=$RESULT_URL" >> $GITHUB_OUTPUT
+          
+          echo "### Target URLs" >> $GITHUB_STEP_SUMMARY
+          echo "- Vote: $VOTE_URL" >> $GITHUB_STEP_SUMMARY
+          echo "- Result: $RESULT_URL" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Install Tools
+        run: |
+          # Install hey for load testing
+          wget -q https://hey-release.s3.us-east-2.amazonaws.com/hey_linux_amd64
+          chmod +x hey_linux_amd64
+          sudo mv hey_linux_amd64 /usr/local/bin/hey
+
+      - name: Test Connectivity
+        run: |
+          echo "### Connectivity Test" >> $GITHUB_STEP_SUMMARY
+          
+          VOTE_URL="${{ steps.urls.outputs.vote_url }}"
+          RESULT_URL="${{ steps.urls.outputs.result_url }}"
+          
+          echo "Testing vote service..."
+          VOTE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$VOTE_URL" --connect-timeout 10 || echo "000")
+          if [ "$VOTE_STATUS" = "200" ]; then
+            echo "✅ Vote service: HTTP $VOTE_STATUS" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Vote service: HTTP $VOTE_STATUS" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "Testing result service..."
+          RESULT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$RESULT_URL" --connect-timeout 10 || echo "000")
+          if [ "$RESULT_STATUS" = "200" ]; then
+            echo "✅ Result service: HTTP $RESULT_STATUS" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Result service: HTTP $RESULT_STATUS" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Generate Traffic to Vote Service
+        if: ${{ github.event.inputs.target == 'vote' || github.event.inputs.target == 'both' }}
+        run: |
+          VOTE_URL="${{ steps.urls.outputs.vote_url }}"
+          DURATION="${{ github.event.inputs.duration }}"
+          RPS="${{ github.event.inputs.requests_per_second }}"
+          INCLUDE_VOTES="${{ github.event.inputs.include_votes }}"
+          
+          TOTAL_REQUESTS=$((DURATION * RPS))
+          CONCURRENCY=$((RPS > 50 ? 50 : RPS))
+          
+          echo "### Vote Service Traffic" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Starting traffic generation: ${TOTAL_REQUESTS} requests over ${DURATION}s (${RPS} RPS)" >> $GITHUB_STEP_SUMMARY
+          
+          # Generate GET traffic
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### GET Requests (Page Load)" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          hey -n $TOTAL_REQUESTS -c $CONCURRENCY -q $RPS "$VOTE_URL" 2>&1 | tee vote_get_results.txt
+          cat vote_get_results.txt >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          # Generate POST traffic (actual votes)
+          if [ "$INCLUDE_VOTES" = "true" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "#### POST Requests (Votes)" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            
+            # Alternate between vote options a and b
+            HALF_REQUESTS=$((TOTAL_REQUESTS / 2))
+            
+            # Vote for option A
+            hey -n $HALF_REQUESTS -c $CONCURRENCY -q $((RPS / 2)) \
+              -m POST \
+              -H "Content-Type: application/x-www-form-urlencoded" \
+              -d "vote=a" \
+              "$VOTE_URL" 2>&1 | tee vote_post_a.txt
+            
+            # Vote for option B
+            hey -n $HALF_REQUESTS -c $CONCURRENCY -q $((RPS / 2)) \
+              -m POST \
+              -H "Content-Type: application/x-www-form-urlencoded" \
+              -d "vote=b" \
+              "$VOTE_URL" 2>&1 | tee vote_post_b.txt
+            
+            echo "Option A votes:" >> $GITHUB_STEP_SUMMARY
+            grep -E "Requests/sec|Average|Status code" vote_post_a.txt >> $GITHUB_STEP_SUMMARY || true
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Option B votes:" >> $GITHUB_STEP_SUMMARY
+            grep -E "Requests/sec|Average|Status code" vote_post_b.txt >> $GITHUB_STEP_SUMMARY || true
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Generate Traffic to Result Service
+        if: ${{ github.event.inputs.target == 'result' || github.event.inputs.target == 'both' }}
+        run: |
+          RESULT_URL="${{ steps.urls.outputs.result_url }}"
+          DURATION="${{ github.event.inputs.duration }}"
+          RPS="${{ github.event.inputs.requests_per_second }}"
+          
+          TOTAL_REQUESTS=$((DURATION * RPS))
+          CONCURRENCY=$((RPS > 50 ? 50 : RPS))
+          
+          echo "### Result Service Traffic" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Starting traffic generation: ${TOTAL_REQUESTS} requests over ${DURATION}s (${RPS} RPS)" >> $GITHUB_STEP_SUMMARY
+          
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          hey -n $TOTAL_REQUESTS -c $CONCURRENCY -q $RPS "$RESULT_URL" 2>&1 | tee result_get_results.txt
+          cat result_get_results.txt >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Traffic Summary
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Traffic generation complete. Check the Prometheus dashboard or run the" >> $GITHUB_STEP_SUMMARY
+          echo "\`configure-prometheus-nginx.yaml\` workflow to verify metrics are being collected." >> $GITHUB_STEP_SUMMARY
