@@ -2,7 +2,7 @@
 # ║  ENDPOINT VERIFICATION - Quick HTTPS Test                                     ║
 # ║                                                                                ║
 # ║  Simple, fast verification of HTTPS endpoints:                                 ║
-# ║  • DEV: https://opsera-voting-app.agent.opsera.dev                             ║
+# ║  • DEV: https://opsera-voting-app-dev.agent.opsera.dev                         ║
 # ║  • QA:  https://opsera-voting-app-qa.agent.opsera.dev                          ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -15,7 +15,7 @@ on:
     - cron: '0 9-17 * * 1-5'
 
 env:
-  DEV_URL: https://opsera-voting-app.agent.opsera.dev
+  DEV_URL: https://opsera-voting-app-dev.agent.opsera.dev
   QA_URL: https://opsera-voting-app-qa.agent.opsera.dev
 
 jobs:
@@ -71,7 +71,7 @@ jobs:
           echo "|-------------|--------|---------|" >> $GITHUB_STEP_SUMMARY
           
           # DEV Certificate
-          DEV_CERT=$(echo | timeout 5 openssl s_client -servername opsera-voting-app.agent.opsera.dev -connect opsera-voting-app.agent.opsera.dev:443 2>/dev/null | openssl x509 -noout -issuer -enddate 2>/dev/null || echo "")
+          DEV_CERT=$(echo | timeout 5 openssl s_client -servername opsera-voting-app-dev.agent.opsera.dev -connect opsera-voting-app-dev.agent.opsera.dev:443 2>/dev/null | openssl x509 -noout -issuer -enddate 2>/dev/null || echo "")
           if [ -n "$DEV_CERT" ]; then
             DEV_ISSUER=$(echo "$DEV_CERT" | grep issuer | sed 's/.*O = //' | cut -d',' -f1)
             DEV_EXPIRY=$(echo "$DEV_CERT" | grep notAfter | cut -d= -f2)
@@ -110,5 +110,5 @@ jobs:
             echo "**Troubleshooting:**" >> $GITHUB_STEP_SUMMARY
             echo "1. Check if pods are running: \`kubectl get pods -n voting-app-dev\`" >> $GITHUB_STEP_SUMMARY
             echo "2. Check ingress status: \`kubectl get ingress -A\`" >> $GITHUB_STEP_SUMMARY
-            echo "3. Check DNS: \`dig opsera-voting-app.agent.opsera.dev\`" >> $GITHUB_STEP_SUMMARY
+            echo "3. Check DNS: \`dig opsera-voting-app-dev.agent.opsera.dev\`" >> $GITHUB_STEP_SUMMARY
           fi

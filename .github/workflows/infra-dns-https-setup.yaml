@@ -8,7 +8,7 @@
 # ║  • HTTPS endpoint testing                                                      ║
 # ║                                                                                ║
 # ║  Endpoints:                                                                    ║
-# ║  • DEV: https://opsera-voting-app.agent.opsera.dev                             ║
+# ║  • DEV: https://opsera-voting-app-dev.agent.opsera.dev                         ║
 # ║  • QA:  https://opsera-voting-app-qa.agent.opsera.dev                          ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -42,7 +42,7 @@ env:
   DOMAIN: agent.opsera.dev
   HOSTED_ZONE_ID: Z00454aborb9KAMPLE  # Replace with actual zone ID
   SPOKE_CLUSTER: opsera-usw2-np
-  DEV_HOST: opsera-voting-app.agent.opsera.dev
+  DEV_HOST: opsera-voting-app-dev.agent.opsera.dev
   QA_HOST: opsera-voting-app-qa.agent.opsera.dev
 
 permissions:

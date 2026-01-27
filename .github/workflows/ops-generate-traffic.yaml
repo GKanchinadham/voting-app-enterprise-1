@@ -46,8 +46,8 @@ jobs:
           
           case "$ENV" in
             dev)
-              VOTE_URL="https://opsera-voting-app.agent.opsera.dev"
-              RESULT_URL="https://results.opsera-voting-app.agent.opsera.dev"
+              VOTE_URL="https://opsera-voting-app-dev.agent.opsera.dev"
+              RESULT_URL="https://results.opsera-voting-app-dev.agent.opsera.dev"
               ;;
             qa)
               VOTE_URL="https://opsera-voting-app-qa.agent.opsera.dev"

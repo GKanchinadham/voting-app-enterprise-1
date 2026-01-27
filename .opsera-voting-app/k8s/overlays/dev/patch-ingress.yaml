@@ -1,5 +1,5 @@
 # Patch for main vote ingress - DEV environment
-# Uses base hostname without -dev suffix for simplicity
+# Uses -dev suffix for consistency with QA (-qa suffix)
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -13,10 +13,10 @@ spec:
   ingressClassName: nginx
   tls:
   - hosts:
-    - opsera-voting-app.agent.opsera.dev
-    secretName: voting-app-tls
+    - opsera-voting-app-dev.agent.opsera.dev
+    secretName: voting-app-dev-tls
   rules:
-  - host: opsera-voting-app.agent.opsera.dev
+  - host: opsera-voting-app-dev.agent.opsera.dev
     http:
       paths:
       - path: /

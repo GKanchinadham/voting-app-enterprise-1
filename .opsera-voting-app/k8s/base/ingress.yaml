@@ -13,11 +13,11 @@ spec:
   ingressClassName: nginx
   tls:
   - hosts:
-    - opsera-voting-app.agent.opsera.dev
-    secretName: voting-app-tls
+    - opsera-voting-app-dev.agent.opsera.dev
+    secretName: voting-app-dev-tls
   rules:
   # Vote frontend (main entry point)
-  - host: opsera-voting-app.agent.opsera.dev
+  - host: opsera-voting-app-dev.agent.opsera.dev
     http:
       paths:
       - path: /

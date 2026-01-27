@@ -106,8 +106,8 @@ jobs:
           echo "| Environment | URL | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|-------------|-----|--------|" >> $GITHUB_STEP_SUMMARY
           
-          DEV_STATUS=$(curl -skI "https://opsera-voting-app.agent.opsera.dev/" 2>/dev/null | head -1 || echo "Error")
+          DEV_STATUS=$(curl -skI "https://opsera-voting-app-dev.agent.opsera.dev/" 2>/dev/null | head -1 || echo "Error")
           QA_STATUS=$(curl -skI "https://opsera-voting-app-qa.agent.opsera.dev/" 2>/dev/null | head -1 || echo "Error")
           
-          echo "| DEV | https://opsera-voting-app.agent.opsera.dev | \`${DEV_STATUS}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| DEV | https://opsera-voting-app-dev.agent.opsera.dev | \`${DEV_STATUS}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| QA | https://opsera-voting-app-qa.agent.opsera.dev | \`${QA_STATUS}\` |" >> $GITHUB_STEP_SUMMARY

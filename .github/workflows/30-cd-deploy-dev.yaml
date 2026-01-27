@@ -33,8 +33,8 @@ env:
   ENVIRONMENT: dev
   HUB_CLUSTER: argocd-usw2
   SPOKE_CLUSTER: opsera-usw2-np
-  DEV_URL: https://opsera-voting-app.agent.opsera.dev
-  DEV_RESULTS_URL: https://results.opsera-voting-app.agent.opsera.dev
+  DEV_URL: https://opsera-voting-app-dev.agent.opsera.dev
+  DEV_RESULTS_URL: https://results.opsera-voting-app-dev.agent.opsera.dev
 
 permissions:
   contents: write
