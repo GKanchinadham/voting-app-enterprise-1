@@ -1,0 +1,468 @@
+name: "Deployment Landscape Report"
+
+# ============================================================================
+# Generates a comprehensive deployment landscape report showing:
+# - All environments and their status
+# - Current builds/versions in each environment
+# - Last deployment timestamps
+# - Recent changes history per environment
+# - Deployment flow visualization
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      slack_notify:
+        description: 'Send report to Slack'
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    # Run daily at 9 AM UTC
+    - cron: '0 9 * * *'
+
+env:
+  AWS_REGION: us-west-2
+  APP_NAME: voting-app
+  HUB_CLUSTER: argocd-usw2
+  SPOKE_CLUSTER: opsera-usw2-np
+  # Define all environments
+  ENVIRONMENTS: "dev qa staging prod"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  generate-report:
+    name: "Generate Deployment Landscape"
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 100  # Get history for change analysis
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Tools
+        run: |
+          # Install kubectl
+          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+          
+          # Install jq for JSON processing
+          sudo apt-get update && sudo apt-get install -y jq
+
+      # ============================================
+      # Generate Report Header
+      # ============================================
+      - name: Generate Report Header
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          # 🌍 Deployment Landscape Report
+          
+          **Generated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          **Application:** voting-app
+          **Repository:** ${{ github.repository }}
+          
+          ---
+          
+          ## 🔄 Deployment Flow
+          
+          ```
+          ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐
+          │   DEV   │───►│   QA    │───►│ STAGING │───►│  PROD   │
+          │         │    │(Canary) │    │         │    │         │
+          └─────────┘    └─────────┘    └─────────┘    └─────────┘
+               │              │              │              │
+               ▼              ▼              ▼              ▼
+          Feature        Integration    Pre-Prod       Production
+          Testing        & Canary       Validation     Release
+          ```
+          
+          ---
+          
+          EOF
+
+      # ============================================
+      # Collect Environment Data
+      # ============================================
+      - name: Collect Environment Data
+        id: collect
+        run: |
+          # Connect to hub cluster for ArgoCD data
+          aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
+          
+          echo "## 📊 Environment Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | Status | Health | Sync | Current Build | Last Deployed |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------------|--------|--------|------|---------------|---------------|" >> $GITHUB_STEP_SUMMARY
+          
+          # Create JSON for Slack
+          echo '{"environments":[' > /tmp/env_data.json
+          FIRST=true
+          
+          for ENV in dev qa staging prod; do
+            APP_NAME="${{ env.APP_NAME }}-${ENV}"
+            
+            # Check if ArgoCD application exists
+            if kubectl get application "${APP_NAME}" -n argocd &>/dev/null; then
+              # Get application details
+              SYNC_STATUS=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+              HEALTH_STATUS=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Unknown")
+              REVISION=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.sync.revision}' 2>/dev/null || echo "Unknown")
+              REVISION_SHORT="${REVISION:0:7}"
+              
+              # Get last sync time
+              LAST_SYNC=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.operationState.finishedAt}' 2>/dev/null || echo "Unknown")
+              if [ "$LAST_SYNC" != "Unknown" ] && [ -n "$LAST_SYNC" ]; then
+                LAST_SYNC_FORMATTED=$(date -d "$LAST_SYNC" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$LAST_SYNC")
+              else
+                LAST_SYNC_FORMATTED="Never"
+              fi
+              
+              # Get image tag from kustomization
+              OVERLAY_PATH=".opsera-voting-app/k8s/overlays/${ENV}/kustomization.yaml"
+              if [ -f "$OVERLAY_PATH" ]; then
+                IMAGE_TAG=$(grep -A1 "name: vote" "$OVERLAY_PATH" | grep "newTag" | awk -F': ' '{print $2}' | tr -d ' ' || echo "Unknown")
+              else
+                IMAGE_TAG="N/A"
+              fi
+              
+              # Determine status emoji
+              case "$HEALTH_STATUS" in
+                "Healthy") HEALTH_EMOJI="🟢" ;;
+                "Progressing") HEALTH_EMOJI="🔵" ;;
+                "Degraded") HEALTH_EMOJI="🔴" ;;
+                "Suspended") HEALTH_EMOJI="⏸️" ;;
+                *) HEALTH_EMOJI="⚪" ;;
+              esac
+              
+              case "$SYNC_STATUS" in
+                "Synced") SYNC_EMOJI="✅" ;;
+                "OutOfSync") SYNC_EMOJI="⚠️" ;;
+                *) SYNC_EMOJI="❓" ;;
+              esac
+              
+              # Check for canary
+              CANARY_INFO=""
+              if [ "$ENV" = "qa" ]; then
+                CANARY_INFO=" (Canary)"
+              fi
+              
+              echo "| **${ENV^^}**${CANARY_INFO} | ${HEALTH_EMOJI} ${HEALTH_STATUS} | ${HEALTH_EMOJI} | ${SYNC_EMOJI} ${SYNC_STATUS} | \`${IMAGE_TAG}\` | ${LAST_SYNC_FORMATTED} |" >> $GITHUB_STEP_SUMMARY
+              
+              # Add to JSON
+              if [ "$FIRST" = "true" ]; then
+                FIRST=false
+              else
+                echo "," >> /tmp/env_data.json
+              fi
+              cat >> /tmp/env_data.json << ENVJSON
+              {
+                "name": "${ENV}",
+                "health": "${HEALTH_STATUS}",
+                "sync": "${SYNC_STATUS}",
+                "build": "${IMAGE_TAG}",
+                "lastDeployed": "${LAST_SYNC_FORMATTED}",
+                "revision": "${REVISION_SHORT}"
+              }
+          ENVJSON
+            else
+              echo "| **${ENV^^}** | ⚪ Not Deployed | - | - | N/A | Never |" >> $GITHUB_STEP_SUMMARY
+              
+              if [ "$FIRST" = "true" ]; then
+                FIRST=false
+              else
+                echo "," >> /tmp/env_data.json
+              fi
+              cat >> /tmp/env_data.json << ENVJSON
+              {
+                "name": "${ENV}",
+                "health": "Not Deployed",
+                "sync": "N/A",
+                "build": "N/A",
+                "lastDeployed": "Never",
+                "revision": "N/A"
+              }
+          ENVJSON
+            fi
+          done
+          
+          echo ']}' >> /tmp/env_data.json
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      # ============================================
+      # Build Version Matrix
+      # ============================================
+      - name: Build Version Matrix
+        run: |
+          echo "## 🏷️ Build Version Matrix" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | DEV | QA | STAGING | PROD |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-----|-----|---------|------|" >> $GITHUB_STEP_SUMMARY
+          
+          for SERVICE in vote result worker; do
+            ROW="| **${SERVICE}** |"
+            
+            for ENV in dev qa staging prod; do
+              OVERLAY_PATH=".opsera-voting-app/k8s/overlays/${ENV}/kustomization.yaml"
+              if [ -f "$OVERLAY_PATH" ]; then
+                TAG=$(grep -A1 "name: ${SERVICE}" "$OVERLAY_PATH" | grep "newTag" | awk -F': ' '{print $2}' | tr -d ' ' || echo "-")
+                if [ -n "$TAG" ] && [ "$TAG" != "-" ]; then
+                  # Shorten tag for display
+                  SHORT_TAG=$(echo "$TAG" | cut -c1-15)
+                  ROW="${ROW} \`${SHORT_TAG}\` |"
+                else
+                  ROW="${ROW} - |"
+                fi
+              else
+                ROW="${ROW} - |"
+              fi
+            done
+            
+            echo "$ROW" >> $GITHUB_STEP_SUMMARY
+          done
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      # ============================================
+      # Recent Changes Per Environment
+      # ============================================
+      - name: Recent Changes History
+        run: |
+          echo "## 📜 Recent Deployment History (Last 5 Changes)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          for ENV in dev qa staging prod; do
+            OVERLAY_PATH=".opsera-voting-app/k8s/overlays/${ENV}/kustomization.yaml"
+            
+            echo "### ${ENV^^} Environment" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            if [ -f "$OVERLAY_PATH" ]; then
+              echo "| Date | Commit | Author | Message |" >> $GITHUB_STEP_SUMMARY
+              echo "|------|--------|--------|---------|" >> $GITHUB_STEP_SUMMARY
+              
+              # Get last 5 commits that modified this overlay
+              git log -5 --pretty=format:"%ad|%h|%an|%s" --date=short -- "$OVERLAY_PATH" 2>/dev/null | while IFS='|' read -r DATE HASH AUTHOR MSG; do
+                # Truncate message if too long
+                SHORT_MSG="${MSG:0:50}"
+                if [ ${#MSG} -gt 50 ]; then
+                  SHORT_MSG="${SHORT_MSG}..."
+                fi
+                echo "| ${DATE} | \`${HASH}\` | ${AUTHOR} | ${SHORT_MSG} |" >> $GITHUB_STEP_SUMMARY
+              done
+              
+              # Check if any commits were found
+              COMMIT_COUNT=$(git log -5 --oneline -- "$OVERLAY_PATH" 2>/dev/null | wc -l)
+              if [ "$COMMIT_COUNT" -eq 0 ]; then
+                echo "| - | - | - | No deployment history found |" >> $GITHUB_STEP_SUMMARY
+              fi
+            else
+              echo "| - | - | - | Environment not configured |" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            echo "" >> $GITHUB_STEP_SUMMARY
+          done
+
+      # ============================================
+      # Canary Status (QA Environment)
+      # ============================================
+      - name: Canary Deployment Status
+        run: |
+          echo "## 🐤 Canary Deployment Status (QA)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Connect to spoke cluster for rollout data
+          aws eks update-kubeconfig --name ${{ env.SPOKE_CLUSTER }} --region ${{ env.AWS_REGION }}
+          
+          NAMESPACE="${{ env.APP_NAME }}-qa"
+          
+          # Check if namespace exists
+          if kubectl get namespace "${NAMESPACE}" &>/dev/null; then
+            echo "| Rollout | Phase | Current Step | Canary Weight | Stable | Canary |" >> $GITHUB_STEP_SUMMARY
+            echo "|---------|-------|--------------|---------------|--------|--------|" >> $GITHUB_STEP_SUMMARY
+            
+            for ROLLOUT in vote-rollout result-rollout; do
+              if kubectl get rollout "${ROLLOUT}" -n "${NAMESPACE}" &>/dev/null; then
+                PHASE=$(kubectl get rollout "${ROLLOUT}" -n "${NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+                STEP=$(kubectl get rollout "${ROLLOUT}" -n "${NAMESPACE}" -o jsonpath='{.status.currentStepIndex}' 2>/dev/null || echo "-")
+                TOTAL_STEPS=$(kubectl get rollout "${ROLLOUT}" -n "${NAMESPACE}" -o jsonpath='{.spec.strategy.canary.steps}' 2>/dev/null | jq 'length' || echo "-")
+                STABLE_RS=$(kubectl get rollout "${ROLLOUT}" -n "${NAMESPACE}" -o jsonpath='{.status.stableRS}' 2>/dev/null || echo "-")
+                CANARY_RS=$(kubectl get rollout "${ROLLOUT}" -n "${NAMESPACE}" -o jsonpath='{.status.canary.currentStepAnalysisRunStatus}' 2>/dev/null || echo "-")
+                
+                # Get canary weight if available
+                WEIGHT=$(kubectl get rollout "${ROLLOUT}" -n "${NAMESPACE}" -o jsonpath='{.status.canary.weights.canary.weight}' 2>/dev/null || echo "0")
+                
+                case "$PHASE" in
+                  "Healthy") PHASE_EMOJI="🟢" ;;
+                  "Progressing") PHASE_EMOJI="🔵" ;;
+                  "Paused") PHASE_EMOJI="⏸️" ;;
+                  "Degraded") PHASE_EMOJI="🔴" ;;
+                  *) PHASE_EMOJI="⚪" ;;
+                esac
+                
+                STABLE_SHORT="${STABLE_RS:0:10}"
+                
+                echo "| ${ROLLOUT} | ${PHASE_EMOJI} ${PHASE} | ${STEP}/${TOTAL_STEPS} | ${WEIGHT}% | \`${STABLE_SHORT}\` | - |" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "| ${ROLLOUT} | ⚪ Not Found | - | - | - | - |" >> $GITHUB_STEP_SUMMARY
+              fi
+            done
+          else
+            echo "QA namespace not found. Canary deployments not configured." >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      # ============================================
+      # Infrastructure Summary
+      # ============================================
+      - name: Infrastructure Summary
+        run: |
+          echo "## 🏗️ Infrastructure Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **AWS Region** | ${{ env.AWS_REGION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Hub Cluster** | ${{ env.HUB_CLUSTER }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Spoke Cluster** | ${{ env.SPOKE_CLUSTER }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **GitOps Tool** | ArgoCD |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Canary Controller** | Argo Rollouts |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Ingress** | NGINX |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Monitoring** | Prometheus |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      # ============================================
+      # Environment URLs
+      # ============================================
+      - name: Environment URLs
+        run: |
+          echo "## 🔗 Environment URLs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | Vote App | Results App |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------------|----------|-------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **DEV** | [opsera-voting-app-dev.agent.opsera.dev](https://opsera-voting-app-dev.agent.opsera.dev) | [results.opsera-voting-app-dev.agent.opsera.dev](https://results.opsera-voting-app-dev.agent.opsera.dev) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **QA** | [opsera-voting-app-qa.agent.opsera.dev](https://opsera-voting-app-qa.agent.opsera.dev) | [results.opsera-voting-app-qa.agent.opsera.dev](https://results.opsera-voting-app-qa.agent.opsera.dev) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **STAGING** | [opsera-voting-app-staging.agent.opsera.dev](https://opsera-voting-app-staging.agent.opsera.dev) | [results.opsera-voting-app-staging.agent.opsera.dev](https://results.opsera-voting-app-staging.agent.opsera.dev) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **PROD** | [opsera-voting-app.agent.opsera.dev](https://opsera-voting-app.agent.opsera.dev) | [results.opsera-voting-app.agent.opsera.dev](https://results.opsera-voting-app.agent.opsera.dev) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      # ============================================
+      # Send to Slack (Optional)
+      # ============================================
+      - name: Send Report to Slack
+        if: ${{ github.event.inputs.slack_notify == 'true' || github.event_name == 'schedule' }}
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK" ]; then
+            echo "Slack webhook not configured. Skipping notification."
+            exit 0
+          fi
+          
+          # Read environment data
+          ENV_DATA=$(cat /tmp/env_data.json)
+          
+          # Build environment fields
+          ENV_FIELDS=""
+          for ENV in dev qa staging prod; do
+            HEALTH=$(echo "$ENV_DATA" | jq -r ".environments[] | select(.name==\"$ENV\") | .health")
+            BUILD=$(echo "$ENV_DATA" | jq -r ".environments[] | select(.name==\"$ENV\") | .build")
+            LAST=$(echo "$ENV_DATA" | jq -r ".environments[] | select(.name==\"$ENV\") | .lastDeployed")
+            
+            case "$HEALTH" in
+              "Healthy") EMOJI="🟢" ;;
+              "Progressing") EMOJI="🔵" ;;
+              "Degraded") EMOJI="🔴" ;;
+              *) EMOJI="⚪" ;;
+            esac
+            
+            ENV_FIELDS="${ENV_FIELDS}{\"type\":\"mrkdwn\",\"text\":\"*${ENV^^}* ${EMOJI}\\n\`${BUILD:-N/A}\`\\n${LAST:-Never}\"},"
+          done
+          
+          # Remove trailing comma
+          ENV_FIELDS="${ENV_FIELDS%,}"
+          
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "🌍 Deployment Landscape Report",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Application:* `voting-app`\n*Generated:* '"$(date -u '+%Y-%m-%d %H:%M UTC')"'"
+                  }
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Environment Status*"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": ['"${ENV_FIELDS}"']
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Deployment Flow*\n```DEV → QA (Canary) → STAGING → PROD```"
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "📊 <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Full Report>"
+                    }
+                  ]
+                }
+              ]
+            }' \
+            "$SLACK_WEBHOOK" || true
+
+      # ============================================
+      # Final Summary
+      # ============================================
+      - name: Generate Final Summary
+        run: |
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📋 Quick Actions" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Action | Command |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Deploy to DEV | \`gh workflow run ci-cd-voting-app.yaml -f environment=dev\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deploy to QA | \`gh workflow run ci-cd-voting-app.yaml -f environment=qa\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run Diagnostics | \`gh workflow run diagnostics.yaml -f environment=qa\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Test Canary Rollback | \`gh workflow run test-canary-rollback.yaml -f environment=qa\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "*Report generated by Opsera Code-to-Cloud Platform*" >> $GITHUB_STEP_SUMMARY
