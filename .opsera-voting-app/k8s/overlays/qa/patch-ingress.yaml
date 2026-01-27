@@ -1,0 +1,29 @@
+# Patch for main vote ingress - QA environment with canary support
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: voting-app
+  labels:
+    environment: qa
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # Canary annotations for Argo Rollouts traffic splitting
+    nginx.ingress.kubernetes.io/canary: "true"
+    nginx.ingress.kubernetes.io/canary-weight: "0"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - opsera-voting-app-qa.agent.opsera.dev
+    secretName: voting-app-qa-tls
+  rules:
+  - host: opsera-voting-app-qa.agent.opsera.dev
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: vote
+            port:
+              number: 80

@@ -176,11 +176,26 @@ jobs:
           KUBECTL="./kubectl"
           git pull origin main
 
-          APP_MANIFEST=".opsera-${{ env.APP_NAME }}/argocd/application.yaml"
-          if [ -f "$APP_MANIFEST" ]; then
-            $KUBECTL apply -f "$APP_MANIFEST"
-            echo "ArgoCD Application created/updated"
+          # Check for environment-specific ArgoCD application first
+          APP_MANIFEST_ENV=".opsera-${{ env.APP_NAME }}/argocd/application-${{ env.ENVIRONMENT }}.yaml"
+          APP_MANIFEST_DEFAULT=".opsera-${{ env.APP_NAME }}/argocd/application.yaml"
+
+          if [ -f "$APP_MANIFEST_ENV" ]; then
+            echo "Using environment-specific ArgoCD application: $APP_MANIFEST_ENV"
+            $KUBECTL apply -f "$APP_MANIFEST_ENV"
+          elif [ -f "$APP_MANIFEST_DEFAULT" ]; then
+            echo "Using default ArgoCD application: $APP_MANIFEST_DEFAULT"
+            # Update the default application with environment-specific values
+            sed -i "s|name: ${{ env.APP_NAME }}-.*|name: ${{ env.APP_NAME }}-${{ env.ENVIRONMENT }}|" "$APP_MANIFEST_DEFAULT"
+            sed -i "s|environment: .*|environment: ${{ env.ENVIRONMENT }}|" "$APP_MANIFEST_DEFAULT"
+            sed -i "s|path: .opsera-${{ env.APP_NAME }}/k8s/overlays/.*|path: .opsera-${{ env.APP_NAME }}/k8s/overlays/${{ env.ENVIRONMENT }}|" "$APP_MANIFEST_DEFAULT"
+            sed -i "s|namespace: ${{ env.APP_NAME }}-.*|namespace: ${{ env.APP_NAME }}-${{ env.ENVIRONMENT }}|" "$APP_MANIFEST_DEFAULT"
+            $KUBECTL apply -f "$APP_MANIFEST_DEFAULT"
+          else
+            echo "ERROR: No ArgoCD application manifest found"
+            exit 1
           fi
+          echo "ArgoCD Application created/updated for environment: ${{ env.ENVIRONMENT }}"
 
   # ============================================
   # STAGE 4: Verify Bootstrap Complete
