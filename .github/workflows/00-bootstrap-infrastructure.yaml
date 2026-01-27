@@ -326,6 +326,47 @@ jobs:
             fi
           done
 
+      - name: Cleanup Orphaned Resources
+        run: |
+          ENVS="${{ github.event.inputs.environment }}"
+          [ "$ENVS" = "all" ] && ENVS="dev qa"
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🧹 Orphaned Resource Cleanup" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Namespace | Action |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          
+          for ENV in $ENVS; do
+            NS="${{ env.APP_NAME }}-${ENV}"
+            
+            if kubectl get namespace "$NS" &>/dev/null; then
+              # Delete old StatefulSets (dev uses Deployments instead)
+              for sts in db redis; do
+                if kubectl get statefulset "$sts" -n "$NS" &>/dev/null; then
+                  kubectl delete statefulset "$sts" -n "$NS" --force --grace-period=0 2>/dev/null || true
+                  echo "| StatefulSet/$sts | $NS | 🗑️ Deleted |" >> $GITHUB_STEP_SUMMARY
+                fi
+              done
+              
+              # Delete ReplicaSets with invalid/placeholder images
+              for rs in $(kubectl get rs -n "$NS" -o name 2>/dev/null || true); do
+                IMAGE=$(kubectl get "$rs" -n "$NS" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+                if echo "$IMAGE" | grep -qiE "PLACEHOLDER|invalid|none|:latest$"; then
+                  kubectl delete "$rs" -n "$NS" --force --grace-period=0 2>/dev/null || true
+                  echo "| $rs | $NS | 🗑️ Deleted (invalid image) |" >> $GITHUB_STEP_SUMMARY
+                fi
+              done
+              
+              # Delete any stuck pods in error states
+              for pod in $(kubectl get pods -n "$NS" --field-selector=status.phase=Failed -o name 2>/dev/null || true); do
+                kubectl delete "$pod" -n "$NS" --force --grace-period=0 2>/dev/null || true
+                echo "| $pod | $NS | 🗑️ Deleted (failed) |" >> $GITHUB_STEP_SUMMARY
+              done
+            fi
+          done
+          
+          echo "Cleanup complete" >> $GITHUB_STEP_SUMMARY
+
   # ════════════════════════════════════════════════════════════════════════════════
   # STAGE 5: GITHUB ENVIRONMENTS (Idempotent)
   # ════════════════════════════════════════════════════════════════════════════════

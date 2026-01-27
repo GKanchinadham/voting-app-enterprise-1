@@ -156,21 +156,58 @@ jobs:
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
+      - name: Cleanup Orphaned Resources
+        run: |
+          # Connect to spoke cluster to cleanup orphaned resources
+          aws eks update-kubeconfig --name ${{ env.SPOKE_CLUSTER }} --region ${{ env.AWS_REGION }}
+          
+          NAMESPACE="voting-app-${{ env.ENVIRONMENT }}"
+          
+          echo "### 🧹 Orphaned Resource Cleanup" >> $GITHUB_STEP_SUMMARY
+          
+          # Delete old ReplicaSets with invalid/placeholder images (from previous failed deployments)
+          echo "Checking for invalid ReplicaSets..."
+          for rs in $(kubectl get rs -n "$NAMESPACE" -o name 2>/dev/null || true); do
+            IMAGE=$(kubectl get "$rs" -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+            if echo "$IMAGE" | grep -qiE "PLACEHOLDER|invalid|none"; then
+              echo "Deleting orphaned ReplicaSet with invalid image: $rs"
+              kubectl delete "$rs" -n "$NAMESPACE" --force --grace-period=0 2>/dev/null || true
+            fi
+          done
+          
+          # Delete old StatefulSets if any (dev uses Deployments)
+          for sts in db redis; do
+            if kubectl get statefulset "$sts" -n "$NAMESPACE" &>/dev/null; then
+              echo "Deleting old StatefulSet: $sts"
+              kubectl delete statefulset "$sts" -n "$NAMESPACE" --force --grace-period=0 2>/dev/null || true
+              echo "| Deleted StatefulSet | $sts |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+          
+          echo "Orphaned resource cleanup complete" >> $GITHUB_STEP_SUMMARY
+
       - name: Sync ArgoCD Application
         run: |
+          # Connect to hub cluster for ArgoCD operations
           aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
           
           APP_NAME="${{ env.APP_NAME }}-${{ env.ENVIRONMENT }}"
           
-          # Hard refresh
+          # Clear any stuck operations
+          kubectl patch application "${APP_NAME}" -n argocd \
+            --type merge -p '{"status":{"operationState":null}}' 2>/dev/null || true
+          
+          sleep 2
+          
+          # Hard refresh to clear cache
           kubectl patch application "${APP_NAME}" -n argocd \
             --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}' || true
           
           sleep 5
           
-          # Trigger sync
+          # Trigger sync with prune and replace
           kubectl patch application "${APP_NAME}" -n argocd \
-            --type merge -p '{"operation":{"initiatedBy":{"username":"github-actions"},"sync":{"prune":true}}}' || true
+            --type merge -p '{"operation":{"initiatedBy":{"username":"github-actions"},"sync":{"prune":true,"syncStrategy":{"apply":{"force":true}}}}}' || true
           
           echo "### 🔄 ArgoCD Sync" >> $GITHUB_STEP_SUMMARY
           echo "Triggered sync for \`${APP_NAME}\`" >> $GITHUB_STEP_SUMMARY

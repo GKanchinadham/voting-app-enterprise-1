@@ -36,6 +36,8 @@ spec:
       - PrunePropagationPolicy=foreground
       - PruneLast=true
       - ApplyOutOfSyncOnly=true
+      - Replace=true  # Force replace instead of patch to avoid sync validation errors
+      - ServerSideApply=false  # Disable server-side apply for compatibility
     retry:
       limit: 5
       backoff:
@@ -43,10 +45,13 @@ spec:
         factor: 2
         maxDuration: 3m
 
-  # Health check overrides for StatefulSets
+  # Ignore differences in auto-generated fields
   ignoreDifferences:
     - group: apps
-      kind: StatefulSet
+      kind: Deployment
       jsonPointers:
-        - /spec/volumeClaimTemplates/0/apiVersion
-        - /spec/volumeClaimTemplates/0/kind
+        - /spec/replicas  # Ignore replica differences from HPA
+    - group: ""
+      kind: Secret
+      jsonPointers:
+        - /data  # Ignore secret data differences
