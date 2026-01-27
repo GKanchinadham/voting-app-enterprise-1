@@ -21,7 +21,7 @@ spec:
   project: default
 
   source:
-    repoURL: https://github.com/opsera-agentic/voting-app-enterprise-1.git
+    repoURL: https://github.com/GKanchinadham/voting-app-enterprise-1.git
     targetRevision: main
     path: .opsera-voting-app/k8s/overlays/qa
 

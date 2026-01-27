@@ -10,7 +10,7 @@ spec:
 
   # Source repositories allowed
   sourceRepos:
-    - 'https://github.com/opsera-agentic/voting-app-enterprise-1.git'
+    - 'https://github.com/GKanchinadham/voting-app-enterprise-1.git'
 
   # Destination clusters and namespaces
   destinations:
