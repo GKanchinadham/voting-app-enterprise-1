@@ -23,9 +23,12 @@ resources:
   # Ingress
   - ingress.yaml
 
-commonLabels:
-  app.kubernetes.io/part-of: voting-app
-  app.kubernetes.io/managed-by: argocd
+# Use labels transformer to avoid modifying immutable selectors
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: voting-app
+      app.kubernetes.io/managed-by: argocd
+    includeSelectors: false
 
 images:
   - name: vote

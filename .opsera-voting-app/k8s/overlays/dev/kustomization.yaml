@@ -9,8 +9,11 @@ namespace: voting-app-dev
 resources:
   - ../../base
 
-commonLabels:
-  environment: dev
+# Use labels transformer to avoid modifying immutable selectors
+labels:
+  - pairs:
+      environment: dev
+    includeSelectors: false
 
 patches:
   - path: patch-replicas.yaml
