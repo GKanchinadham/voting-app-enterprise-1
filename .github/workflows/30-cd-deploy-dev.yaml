@@ -210,11 +210,22 @@ jobs:
           echo "### ✅ Deployment Verification" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
+          # Show initial app status for debugging
+          echo "--- ArgoCD Application Status ---"
+          kubectl get application "${APP_NAME}" -n argocd -o yaml 2>/dev/null | grep -A20 "status:" | head -30 || true
+          echo "---"
+          
           for i in $(seq 1 $MAX_ATTEMPTS); do
             SYNC=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
             HEALTH=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Unknown")
             
+            # Get sync error if any
+            SYNC_ERROR=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.operationState.message}' 2>/dev/null || echo "")
+            CONDITION=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.conditions[0].message}' 2>/dev/null || echo "")
+            
             echo "[$i/$MAX_ATTEMPTS] Sync: ${SYNC}, Health: ${HEALTH}"
+            [ -n "$SYNC_ERROR" ] && echo "  -> Sync Error: ${SYNC_ERROR}"
+            [ -n "$CONDITION" ] && echo "  -> Condition: ${CONDITION}"
             
             if [ "$SYNC" = "Synced" ] && [ "$HEALTH" = "Healthy" ]; then
               echo "| Sync Status | ✅ ${SYNC} |" >> $GITHUB_STEP_SUMMARY
@@ -228,6 +239,8 @@ jobs:
           
           echo "| Sync Status | ⚠️ ${SYNC} |" >> $GITHUB_STEP_SUMMARY
           echo "| Health Status | ⚠️ ${HEALTH} |" >> $GITHUB_STEP_SUMMARY
+          [ -n "$SYNC_ERROR" ] && echo "| Error | ${SYNC_ERROR} |" >> $GITHUB_STEP_SUMMARY
+          [ -n "$CONDITION" ] && echo "| Condition | ${CONDITION} |" >> $GITHUB_STEP_SUMMARY
           echo "healthy=false" >> $GITHUB_OUTPUT
 
   # ════════════════════════════════════════════════════════════════════════════════
