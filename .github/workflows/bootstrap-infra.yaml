@@ -208,10 +208,17 @@ jobs:
           $KUBECTL cluster-info
 
       - name: Create Repository Secret
-        if: ${{ secrets.GH_PAT != '' }}
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           KUBECTL="./kubectl"
           REPO_URL="${{ github.server_url }}/${{ github.repository }}.git"
+
+          # Skip if no PAT configured
+          if [ -z "$GH_PAT" ]; then
+            echo "GH_PAT not configured, skipping repository secret creation"
+            exit 0
+          fi
 
           # Check if secret exists
           if $KUBECTL get secret repo-${{ env.APP_NAME }} -n argocd 2>/dev/null; then
@@ -221,7 +228,7 @@ jobs:
               -n argocd \
               --from-literal=type=git \
               --from-literal=url="$REPO_URL" \
-              --from-literal=password="${{ secrets.GH_PAT }}" \
+              --from-literal=password="$GH_PAT" \
               --from-literal=username="git"
 
             $KUBECTL label secret repo-${{ env.APP_NAME }} -n argocd \
