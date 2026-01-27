@@ -28,11 +28,11 @@ button i{
 }
 
 button.a{
-  background-color: #10b981;  /* Emerald Green - Canary v3 */
+  background-color: #7c3aed;  /* Violet Purple - Canary v4 */
 }
 
 button.b{
-  background-color: #3b82f6;  /* Blue - Canary v3 */
+  background-color: #f59e0b;  /* Amber Gold - Canary v4 */
 }
 
 #tip{
@@ -99,19 +99,19 @@ button.b{
 }
 
 #choice button.a:hover{
-  background-color: #059669;  /* Emerald hover - Canary v3 */
+  background-color: #6d28d9;  /* Violet hover - Canary v4 */
 }
 
 #choice button.b:hover{
-  background-color: #2563eb;  /* Blue hover - Canary v3 */
+  background-color: #d97706;  /* Amber hover - Canary v4 */
 }
 
 #choice button.a:focus{
-  background-color: #059669;  /* Emerald focus - Canary v3 */
+  background-color: #6d28d9;  /* Violet focus - Canary v4 */
 }
 
 #choice button.b:focus{
-  background-color: #2563eb;  /* Blue focus - Canary v3 */
+  background-color: #d97706;  /* Amber focus - Canary v4 */
 }
 
 #background-stats{
