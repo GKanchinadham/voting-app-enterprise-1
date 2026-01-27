@@ -226,6 +226,7 @@ jobs:
     name: "Update Kustomize Manifests"
     runs-on: ubuntu-latest
     needs: [verify-prerequisites, build-and-push]
+    if: always() && needs.verify-prerequisites.result == 'success' && needs.build-and-push.result == 'success'
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -271,6 +272,7 @@ jobs:
     name: "Verify ArgoCD Sync"
     runs-on: ubuntu-latest
     needs: [verify-prerequisites, update-kustomize]
+    if: always() && needs.update-kustomize.result == 'success'
     steps:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
