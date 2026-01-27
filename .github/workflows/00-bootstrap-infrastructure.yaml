@@ -236,14 +236,18 @@ jobs:
             
             # Check if manifest exists
             if [ -f "$MANIFEST" ]; then
-              # Always apply to create or update the application
+              # Delete existing application to force fresh state (AKS-L016)
               if kubectl get application "$APP_NAME" -n argocd &>/dev/null; then
-                kubectl apply -f "$MANIFEST"
-                echo "| ${ENV} | \`${APP_NAME}\` | ✅ Updated |" >> $GITHUB_STEP_SUMMARY
-              else
-                kubectl apply -f "$MANIFEST"
-                echo "| ${ENV} | \`${APP_NAME}\` | 🆕 Created |" >> $GITHUB_STEP_SUMMARY
+                # Remove finalizers first to prevent deletion hang
+                kubectl patch application "$APP_NAME" -n argocd --type json -p '[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
+                kubectl delete application "$APP_NAME" -n argocd --wait=false 2>/dev/null || true
+                sleep 5
+                echo "| ${ENV} | \`${APP_NAME}\` | 🗑️ Deleted old app |" >> $GITHUB_STEP_SUMMARY
               fi
+              
+              # Create fresh application
+              kubectl apply -f "$MANIFEST"
+              echo "| ${ENV} | \`${APP_NAME}\` | 🆕 Created fresh |" >> $GITHUB_STEP_SUMMARY
             else
               echo "| ${ENV} | \`${APP_NAME}\` | ⚠️ Manifest not found: ${MANIFEST} |" >> $GITHUB_STEP_SUMMARY
             fi
