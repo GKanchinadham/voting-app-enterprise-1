@@ -1,0 +1,77 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                      OPERATIONS: GENERATE TRAFFIC                             ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+name: "🔧 Ops: Generate Traffic"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'qa'
+        type: choice
+        options:
+          - dev
+          - qa
+      duration:
+        description: 'Duration (seconds)'
+        required: true
+        default: '120'
+        type: string
+      rps:
+        description: 'Requests per second'
+        required: true
+        default: '10'
+        type: string
+
+jobs:
+  traffic:
+    name: "🚦 Generate Traffic - ${{ github.event.inputs.environment }}"
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Install hey
+        run: |
+          wget -q https://hey-release.s3.us-east-2.amazonaws.com/hey_linux_amd64
+          chmod +x hey_linux_amd64
+          sudo mv hey_linux_amd64 /usr/local/bin/hey
+
+      - name: Generate Traffic
+        run: |
+          ENV="${{ github.event.inputs.environment }}"
+          DURATION="${{ github.event.inputs.duration }}"
+          RPS="${{ github.event.inputs.rps }}"
+          
+          case "$ENV" in
+            dev)
+              VOTE_URL="https://opsera-voting-app.agent.opsera.dev"
+              RESULT_URL="https://results.opsera-voting-app.agent.opsera.dev"
+              ;;
+            qa)
+              VOTE_URL="https://opsera-voting-app-qa.agent.opsera.dev"
+              RESULT_URL="https://results.opsera-voting-app-qa.agent.opsera.dev"
+              ;;
+          esac
+          
+          TOTAL=$((DURATION * RPS))
+          
+          echo "## 🚦 Traffic Generation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Duration | ${DURATION}s |" >> $GITHUB_STEP_SUMMARY
+          echo "| RPS | ${RPS} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Total | ${TOTAL} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### Vote Service" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          hey -n $TOTAL -c 10 -q $RPS "$VOTE_URL" 2>&1 | grep -E "Total|Requests|Average|200" >> $GITHUB_STEP_SUMMARY || echo "Error"
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### Result Service" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          hey -n $TOTAL -c 10 -q $RPS "$RESULT_URL" 2>&1 | grep -E "Total|Requests|Average|200" >> $GITHUB_STEP_SUMMARY || echo "Error"
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

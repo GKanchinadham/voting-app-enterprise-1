@@ -1,0 +1,115 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                      OPERATIONS: ROLLOUT ACTIONS                              ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+name: "🔧 Ops: Rollout Actions"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'qa'
+        type: choice
+        options:
+          - qa
+      rollout:
+        description: 'Rollout'
+        required: true
+        default: 'vote-rollout'
+        type: choice
+        options:
+          - vote-rollout
+          - result-rollout
+          - all
+      action:
+        description: 'Action'
+        required: true
+        default: 'promote'
+        type: choice
+        options:
+          - promote
+          - retry
+          - restart
+          - abort
+
+env:
+  AWS_REGION: us-west-2
+  APP_NAME: voting-app
+  SPOKE_CLUSTER: opsera-usw2-np
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  action:
+    name: "${{ github.event.inputs.action }} - ${{ github.event.inputs.rollout }}"
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Tools
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+          curl -LO https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
+          chmod +x kubectl-argo-rollouts-linux-amd64
+          sudo mv kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
+
+      - name: Connect and Execute
+        run: |
+          aws eks update-kubeconfig --name ${{ env.SPOKE_CLUSTER }} --region ${{ env.AWS_REGION }}
+          
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          ROLLOUT="${{ github.event.inputs.rollout }}"
+          ACTION="${{ github.event.inputs.action }}"
+          
+          echo "## 🔧 Rollout Action: ${ACTION}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$ROLLOUT" = "all" ]; then
+            ROLLOUTS="vote-rollout result-rollout"
+          else
+            ROLLOUTS="$ROLLOUT"
+          fi
+          
+          for R in $ROLLOUTS; do
+            echo "### ${R}" >> $GITHUB_STEP_SUMMARY
+            
+            case "$ACTION" in
+              promote)
+                kubectl-argo-rollouts promote "$R" -n "$NAMESPACE"
+                echo "✅ Promoted to next step" >> $GITHUB_STEP_SUMMARY
+                ;;
+              retry)
+                kubectl-argo-rollouts retry "$R" -n "$NAMESPACE"
+                echo "✅ Retried rollout" >> $GITHUB_STEP_SUMMARY
+                ;;
+              restart)
+                kubectl-argo-rollouts restart "$R" -n "$NAMESPACE"
+                echo "✅ Restarted rollout" >> $GITHUB_STEP_SUMMARY
+                ;;
+              abort)
+                kubectl-argo-rollouts abort "$R" -n "$NAMESPACE"
+                echo "⚠️ Aborted rollout" >> $GITHUB_STEP_SUMMARY
+                ;;
+            esac
+            echo "" >> $GITHUB_STEP_SUMMARY
+          done
+          
+          sleep 10
+          
+          echo "### Final Status" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          for R in $ROLLOUTS; do
+            kubectl-argo-rollouts get rollout "$R" -n "$NAMESPACE" --no-color 2>&1 | head -20 >> $GITHUB_STEP_SUMMARY
+          done
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

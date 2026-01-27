@@ -1,0 +1,91 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                         OPERATIONS: DEBUG PODS                                ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+name: "🔧 Ops: Debug Pods"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'qa'
+        type: choice
+        options:
+          - dev
+          - qa
+      pod_filter:
+        description: 'Pod name filter (optional)'
+        required: false
+        type: string
+      log_lines:
+        description: 'Number of log lines'
+        required: false
+        default: '100'
+        type: string
+
+env:
+  AWS_REGION: us-west-2
+  APP_NAME: voting-app
+  SPOKE_CLUSTER: opsera-usw2-np
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  debug:
+    name: "🔧 Debug - ${{ github.event.inputs.environment }}"
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+
+      - name: Connect to Cluster
+        run: aws eks update-kubeconfig --name ${{ env.SPOKE_CLUSTER }} --region ${{ env.AWS_REGION }}
+
+      - name: List Pods
+        run: |
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          
+          echo "## 🔧 Pod Debug - ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### All Pods" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n "${NAMESPACE}" -o wide >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Check Unhealthy Pods
+        run: |
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          FILTER="${{ github.event.inputs.pod_filter }}"
+          LOG_LINES="${{ github.event.inputs.log_lines }}"
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pod Logs" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -n "$FILTER" ]; then
+            PODS=$(kubectl get pods -n "${NAMESPACE}" -o name | grep "$FILTER")
+          else
+            PODS=$(kubectl get pods -n "${NAMESPACE}" -o name | head -5)
+          fi
+          
+          for POD in $PODS; do
+            POD_NAME=$(basename "$POD")
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "#### ${POD_NAME}" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            kubectl logs "${POD}" -n "${NAMESPACE}" --tail="${LOG_LINES}" 2>&1 | head -100 >> $GITHUB_STEP_SUMMARY || echo "No logs available"
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          done

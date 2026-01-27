@@ -1,0 +1,76 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                        OPERATIONS: SYNC ARGOCD                                ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+name: "🔧 Ops: Sync ArgoCD"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'qa'
+        type: choice
+        options:
+          - dev
+          - qa
+      hard_refresh:
+        description: 'Force hard refresh'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  AWS_REGION: us-west-2
+  APP_NAME: voting-app
+  HUB_CLUSTER: argocd-usw2
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  sync:
+    name: "🔄 Sync - ${{ github.event.inputs.environment }}"
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+
+      - name: Connect and Sync
+        run: |
+          aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
+          
+          APP_NAME="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          
+          echo "## 🔄 ArgoCD Sync" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ github.event.inputs.hard_refresh }}" = "true" ]; then
+            kubectl patch application "${APP_NAME}" -n argocd \
+              --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}' || true
+            sleep 5
+          fi
+          
+          kubectl patch application "${APP_NAME}" -n argocd \
+            --type merge -p '{"operation":{"initiatedBy":{"username":"github-actions"},"sync":{"prune":true}}}' || true
+          
+          sleep 30
+          
+          SYNC=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.sync.status}')
+          HEALTH=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.health.status}')
+          
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Sync | ${SYNC} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Health | ${HEALTH} |" >> $GITHUB_STEP_SUMMARY
