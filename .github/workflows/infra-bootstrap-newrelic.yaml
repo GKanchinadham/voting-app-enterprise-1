@@ -37,7 +37,7 @@ on:
 
 env:
   NEWRELIC_URL: https://opsera-nrmock-labs.agent.opsera.dev
-  NEWRELIC_API_KEY: NRAK-XO6GY5NFH2FCVMHXUOC4SIKICUO96Q4Z
+  NEWRELIC_API_KEY: NRAK-4IMK8U4SSYUWIZWETQV6WT7TXF9FL6L3
   APP_NAME: voting-app
 
 permissions:
