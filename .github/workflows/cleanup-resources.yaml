@@ -1,0 +1,203 @@
+name: "Cleanup - Remove Stale K8s Resources"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: string
+        default: 'dev'
+      cleanup_type:
+        description: 'Type of cleanup'
+        required: true
+        type: choice
+        options:
+          - statefulsets-and-pvcs
+          - deployments
+          - all-app-resources
+          - pvcs-only
+        default: 'statefulsets-and-pvcs'
+      dry_run:
+        description: 'Dry run (show what would be deleted)'
+        required: true
+        type: boolean
+        default: true
+
+env:
+  AWS_REGION: us-west-2
+  APP_NAME: voting-app
+  SPOKE_CLUSTER: opsera-usw2-np
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  cleanup:
+    name: "Cleanup Resources"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+
+      - name: Connect to Spoke Cluster
+        run: |
+          aws eks update-kubeconfig --name ${{ env.SPOKE_CLUSTER }} --region ${{ env.AWS_REGION }}
+          kubectl cluster-info
+
+      - name: Show Current Resources
+        run: |
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+
+          echo "## Current Resources in ${NAMESPACE}" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Pods" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n "${NAMESPACE}" 2>/dev/null || echo "No pods"
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          echo "### StatefulSets" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl get statefulsets -n "${NAMESPACE}" 2>/dev/null || echo "No statefulsets"
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          echo "### Deployments" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl get deployments -n "${NAMESPACE}" 2>/dev/null || echo "No deployments"
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          echo "### PVCs" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl get pvc -n "${NAMESPACE}" 2>/dev/null || echo "No PVCs"
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup StatefulSets and PVCs
+        if: ${{ github.event.inputs.cleanup_type == 'statefulsets-and-pvcs' }}
+        run: |
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          DRY_RUN="${{ github.event.inputs.dry_run }}"
+
+          echo "## Cleanup: StatefulSets and PVCs" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "### DRY RUN - No resources will be deleted" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "Would delete StatefulSets:"
+            kubectl get statefulsets -n "${NAMESPACE}" -o name 2>/dev/null || echo "None"
+            echo ""
+            echo "Would delete PVCs:"
+            kubectl get pvc -n "${NAMESPACE}" -o name 2>/dev/null || echo "None"
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### Deleting Resources" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+
+            # Delete StatefulSets first
+            for STS in db redis; do
+              if kubectl get statefulset "${STS}" -n "${NAMESPACE}" 2>/dev/null; then
+                echo "Deleting StatefulSet: ${STS}"
+                kubectl delete statefulset "${STS}" -n "${NAMESPACE}" --wait=false
+              fi
+            done
+
+            # Delete PVCs
+            kubectl delete pvc --all -n "${NAMESPACE}" --wait=false 2>/dev/null || echo "No PVCs to delete"
+
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "### Cleanup Complete" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Cleanup Deployments
+        if: ${{ github.event.inputs.cleanup_type == 'deployments' }}
+        run: |
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          DRY_RUN="${{ github.event.inputs.dry_run }}"
+
+          echo "## Cleanup: Deployments" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "### DRY RUN - No resources will be deleted" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "Would delete Deployments:"
+            kubectl get deployments -n "${NAMESPACE}" -o name 2>/dev/null || echo "None"
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### Deleting Deployments" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+
+            for DEPLOY in vote result worker db redis; do
+              if kubectl get deployment "${DEPLOY}" -n "${NAMESPACE}" 2>/dev/null; then
+                echo "Deleting Deployment: ${DEPLOY}"
+                kubectl delete deployment "${DEPLOY}" -n "${NAMESPACE}" --wait=false
+              fi
+            done
+
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Cleanup PVCs Only
+        if: ${{ github.event.inputs.cleanup_type == 'pvcs-only' }}
+        run: |
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          DRY_RUN="${{ github.event.inputs.dry_run }}"
+
+          echo "## Cleanup: PVCs Only" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "### DRY RUN" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl get pvc -n "${NAMESPACE}" 2>/dev/null || echo "No PVCs"
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### Deleting PVCs" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl delete pvc --all -n "${NAMESPACE}" 2>/dev/null || echo "No PVCs"
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Cleanup All App Resources
+        if: ${{ github.event.inputs.cleanup_type == 'all-app-resources' }}
+        run: |
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          DRY_RUN="${{ github.event.inputs.dry_run }}"
+
+          echo "## Cleanup: All App Resources" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "### DRY RUN - Would delete everything in ${NAMESPACE}" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl get all,pvc,configmap,secret,ingress -n "${NAMESPACE}" 2>/dev/null
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### Deleting All Resources in ${NAMESPACE}" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl delete all,pvc,configmap,secret,ingress --all -n "${NAMESPACE}" 2>/dev/null || echo "Cleanup complete"
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Verify Cleanup
+        if: ${{ github.event.inputs.dry_run == 'false' }}
+        run: |
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+
+          echo "## Post-Cleanup Status" >> $GITHUB_STEP_SUMMARY
+
+          sleep 5
+
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl get all,pvc -n "${NAMESPACE}" 2>/dev/null || echo "Namespace empty or not found"
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "ArgoCD will recreate resources on next sync." >> $GITHUB_STEP_SUMMARY

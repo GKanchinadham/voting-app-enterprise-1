@@ -8,6 +8,24 @@ namespace: voting-app-dev
 
 resources:
   - ../../base
+  # Dev-only: Use Deployments with emptyDir instead of StatefulSets (no EBS CSI driver)
+  - db-deployment.yaml
+  - redis-deployment.yaml
+
+# Exclude StatefulSets from base (replaced by Deployments above)
+patchesStrategicMerge:
+  - |-
+    $patch: delete
+    apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: db
+  - |-
+    $patch: delete
+    apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: redis
 
 # Use labels transformer to avoid modifying immutable selectors
 labels:
