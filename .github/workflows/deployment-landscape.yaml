@@ -208,6 +208,8 @@ jobs:
       # ============================================
       - name: Build Version Matrix
         run: |
+          REPO_URL="https://github.com/${{ github.repository }}"
+          
           echo "## 🏷️ Build Version Matrix" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Service | DEV | QA | STAGING | PROD |" >> $GITHUB_STEP_SUMMARY
@@ -225,9 +227,12 @@ jobs:
                   TAG="-"
                 fi
                 if [ "$TAG" != "-" ]; then
+                  # Extract commit hash (first part before the dash)
+                  COMMIT_HASH=$(echo "$TAG" | cut -d'-' -f1)
                   # Shorten tag for display (first 15 chars)
                   SHORT_TAG=$(echo "$TAG" | cut -c1-15)
-                  ROW="${ROW} \`${SHORT_TAG}\` |"
+                  # Create hyperlink to GitHub commit
+                  ROW="${ROW} [\`${SHORT_TAG}\`](${REPO_URL}/commit/${COMMIT_HASH}) |"
                 else
                   ROW="${ROW} - |"
                 fi
