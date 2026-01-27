@@ -84,29 +84,7 @@ jobs:
           TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
           WORKFLOW_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           
-          DESCRIPTION="🚀 DEV Deployment Started
-
-📋 Deployment Details:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Image Tag: ${IMAGE_TAG}
-• Commit: ${COMMIT_SHA}
-• Branch: ${GITHUB_REF_NAME}
-• Environment: DEV
-• Triggered: ${TIMESTAMP}
-• Triggered By: ${GITHUB_ACTOR}
-• Workflow: ${WORKFLOW_URL}
-
-📝 Commit Message:
-${COMMIT_MSG}
-
-🔄 Deployment Stages:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[ ] Pre-deployment validation
-[ ] Update manifests
-[ ] ArgoCD sync
-[ ] Verify deployment
-[ ] Smoke tests
-[ ] Generate architecture diagram"
+          DESCRIPTION="DEV Deployment: Image ${IMAGE_TAG} by ${GITHUB_ACTOR} at ${TIMESTAMP}"
           
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             -X POST \
@@ -253,9 +231,7 @@ ${COMMIT_MSG}
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git pull --rebase origin main || true
           git add .
-          git diff --staged --quiet || git commit -m "chore(dev): deploy ${{ inputs.image_tag }} [skip ci]
-
-Jira: ${{ needs.jira-create-ticket.outputs.ticket_key }}"
+          git diff --staged --quiet || git commit -m "chore(dev): deploy ${{ inputs.image_tag }} [skip ci]"
           git push origin main || echo "No changes to push"
 
       - name: Update Jira - Manifests Updated
@@ -754,7 +730,7 @@ DATA
           
           COMMENT="🚀 DEV DEPLOYMENT ${STATUS}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+---------------------------------------
 📋 Final Status:
 • Image Tag: ${{ inputs.image_tag }}
 • Environment: DEV  

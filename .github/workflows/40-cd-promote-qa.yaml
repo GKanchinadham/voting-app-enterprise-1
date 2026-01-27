@@ -114,25 +114,7 @@ jobs:
           TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
           WORKFLOW_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           
-          DESCRIPTION="⬆️ QA Promotion Request
-
-📋 Promotion Details:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Image Tag: ${IMAGE_TAG}
-• From: DEV → QA
-• Deployment Type: Canary (10% → 30% → 60% → 100%)
-• Requested: ${TIMESTAMP}
-• Requested By: ${GITHUB_ACTOR}
-• Workflow: ${WORKFLOW_URL}
-
-🔄 Promotion Stages:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[ ] Pre-flight check (DEV health)
-[ ] Approval gate
-[ ] Update QA manifests
-[ ] ArgoCD sync
-[ ] Canary rollout (10% → 100%)
-[ ] Generate architecture diagram"
+          DESCRIPTION="QA Promotion: Image ${IMAGE_TAG} from DEV to QA (Canary) at ${TIMESTAMP}"
           
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             -X POST \
@@ -673,7 +655,7 @@ TRAFFIC
           
           COMMENT="⬆️ QA PROMOTION ${RESULT}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+---------------------------------------
 📋 Final Status:
 • Image Tag: ${{ needs.detect-version.outputs.image_tag }}
 • Target: QA
