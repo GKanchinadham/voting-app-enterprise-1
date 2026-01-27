@@ -4,3 +4,6 @@ bin/
 obj/
 .vs/
 node_modules/
+
+# Cursor MCP configuration (contains secrets)
+.cursor/mcp.json

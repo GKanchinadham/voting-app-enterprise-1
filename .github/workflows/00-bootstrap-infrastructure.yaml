@@ -198,6 +198,12 @@ jobs:
             --from-literal=username="git"
           kubectl label secret "$SECRET_NAME" -n argocd argocd.argoproj.io/secret-type=repository
           echo "| Repository Secret | ✅ Created for ${REPO_URL} |" >> $GITHUB_STEP_SUMMARY
+          
+          # Restart ArgoCD repo-server to clear cached credentials (AKS-L014)
+          echo "| ArgoCD Repo Server | 🔄 Restarting to clear cache |" >> $GITHUB_STEP_SUMMARY
+          kubectl rollout restart deployment argocd-repo-server -n argocd
+          kubectl rollout status deployment argocd-repo-server -n argocd --timeout=120s
+          echo "| ArgoCD Repo Server | ✅ Restarted |" >> $GITHUB_STEP_SUMMARY
 
       - name: Setup ArgoCD Project (Idempotent)
         run: |
@@ -242,6 +248,32 @@ jobs:
               echo "| ${ENV} | \`${APP_NAME}\` | ⚠️ Manifest not found: ${MANIFEST} |" >> $GITHUB_STEP_SUMMARY
             fi
           done
+
+      - name: Force ArgoCD Hard Refresh
+        run: |
+          ENVS="${{ github.event.inputs.environment }}"
+          [ "$ENVS" = "all" ] && ENVS="dev qa"
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔄 ArgoCD Hard Refresh" >> $GITHUB_STEP_SUMMARY
+          
+          for ENV in $ENVS; do
+            APP_NAME="${{ env.APP_NAME }}-${ENV}"
+            
+            if kubectl get application "$APP_NAME" -n argocd &>/dev/null; then
+              # Force hard refresh to pick up repo secret changes
+              kubectl annotate application "$APP_NAME" -n argocd argocd.argoproj.io/refresh=hard --overwrite
+              
+              # Trigger sync operation
+              kubectl patch application "$APP_NAME" -n argocd \
+                --type merge -p '{"operation":{"initiatedBy":{"username":"bootstrap"},"sync":{"prune":true}}}' || true
+              
+              echo "| ${ENV} | \`${APP_NAME}\` | 🔄 Hard refresh triggered |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+          
+          # Wait for sync to start
+          sleep 10
 
   # ════════════════════════════════════════════════════════════════════════════════
   # STAGE 4: KUBERNETES NAMESPACES (Idempotent)
