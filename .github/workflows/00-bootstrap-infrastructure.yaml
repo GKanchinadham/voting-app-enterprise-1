@@ -185,17 +185,19 @@ jobs:
           echo "## 🔄 ArgoCD Configuration" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
+          # Always delete and recreate to ensure correct URL
           if kubectl get secret "$SECRET_NAME" -n argocd &>/dev/null; then
-            echo "| Repository Secret | ✅ Already exists |" >> $GITHUB_STEP_SUMMARY
-          else
-            kubectl create secret generic "$SECRET_NAME" -n argocd \
-              --from-literal=type=git \
-              --from-literal=url="$REPO_URL" \
-              --from-literal=password="$GH_PAT" \
-              --from-literal=username="git"
-            kubectl label secret "$SECRET_NAME" -n argocd argocd.argoproj.io/secret-type=repository
-            echo "| Repository Secret | 🆕 Created |" >> $GITHUB_STEP_SUMMARY
+            kubectl delete secret "$SECRET_NAME" -n argocd
+            echo "| Repository Secret | 🔄 Deleted old secret |" >> $GITHUB_STEP_SUMMARY
           fi
+          
+          kubectl create secret generic "$SECRET_NAME" -n argocd \
+            --from-literal=type=git \
+            --from-literal=url="$REPO_URL" \
+            --from-literal=password="$GH_PAT" \
+            --from-literal=username="git"
+          kubectl label secret "$SECRET_NAME" -n argocd argocd.argoproj.io/secret-type=repository
+          echo "| Repository Secret | ✅ Created for ${REPO_URL} |" >> $GITHUB_STEP_SUMMARY
 
       - name: Setup ArgoCD Project (Idempotent)
         run: |
