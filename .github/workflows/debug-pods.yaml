@@ -1,0 +1,234 @@
+name: "Debug Pods"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to debug'
+        required: true
+        default: 'qa'
+        type: choice
+        options:
+          - dev
+          - qa
+          - staging
+          - prod
+      pod_filter:
+        description: 'Pod name filter (e.g., result, vote, worker)'
+        required: false
+        default: ''
+        type: string
+      log_lines:
+        description: 'Number of log lines to retrieve'
+        required: false
+        default: '100'
+        type: string
+
+env:
+  AWS_REGION: us-west-2
+  SPOKE_CLUSTER: opsera-usw2-np
+  APP_NAME: voting-app
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  debug:
+    name: "Debug Pods - ${{ github.event.inputs.environment }}"
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+
+      - name: Connect to Spoke Cluster
+        run: |
+          aws eks update-kubeconfig --name ${{ env.SPOKE_CLUSTER }} --region ${{ env.AWS_REGION }}
+
+      - name: List All Pods
+        run: |
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          
+          echo "## 📦 All Pods in ${NAMESPACE}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n "${NAMESPACE}" -o wide >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "No pods found"
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Also output to log
+          echo "=== POD LIST ==="
+          kubectl get pods -n "${NAMESPACE}" -o wide
+
+      - name: Get Unhealthy Pods
+        run: |
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          
+          echo "## ⚠️ Unhealthy Pods" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Find pods not in Running state or with restarts
+          UNHEALTHY=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null | grep -v "Running" | grep -v "Completed" || true)
+          RESTARTING=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null | awk '$4 > 0' || true)
+          
+          if [ -n "$UNHEALTHY" ] || [ -n "$RESTARTING" ]; then
+            echo "| Pod | Status | Restarts | Age |" >> $GITHUB_STEP_SUMMARY
+            echo "|-----|--------|----------|-----|" >> $GITHUB_STEP_SUMMARY
+            kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null | while read -r line; do
+              POD=$(echo "$line" | awk '{print $1}')
+              STATUS=$(echo "$line" | awk '{print $3}')
+              RESTARTS=$(echo "$line" | awk '{print $4}')
+              AGE=$(echo "$line" | awk '{print $5}')
+              
+              if [ "$STATUS" != "Running" ] && [ "$STATUS" != "Completed" ]; then
+                echo "| \`${POD}\` | 🔴 ${STATUS} | ${RESTARTS} | ${AGE} |" >> $GITHUB_STEP_SUMMARY
+              elif [ "$RESTARTS" -gt 0 ] 2>/dev/null; then
+                echo "| \`${POD}\` | ⚠️ ${STATUS} | ${RESTARTS} | ${AGE} |" >> $GITHUB_STEP_SUMMARY
+              fi
+            done
+          else
+            echo "✅ All pods are healthy" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Describe Unhealthy Pods
+        run: |
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          FILTER="${{ github.event.inputs.pod_filter }}"
+          
+          echo "## 🔍 Pod Details" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Get pods that are not running or have restarts
+          if [ -n "$FILTER" ]; then
+            PODS=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null | grep "$FILTER" | awk '{print $1}')
+          else
+            PODS=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null | grep -E "CrashLoopBackOff|Error|Pending|ImagePullBackOff|ErrImagePull" | awk '{print $1}')
+          fi
+          
+          if [ -z "$PODS" ]; then
+            echo "No unhealthy pods found (or filter didn't match any pods)" >> $GITHUB_STEP_SUMMARY
+          else
+            for POD in $PODS; do
+              echo "### Pod: ${POD}" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              
+              # Get events for this pod
+              echo "**Events:**" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+              kubectl describe pod "${POD}" -n "${NAMESPACE}" 2>/dev/null | grep -A 20 "Events:" >> $GITHUB_STEP_SUMMARY || echo "No events"
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              
+              # Output to log as well
+              echo "=== DESCRIBE POD: ${POD} ==="
+              kubectl describe pod "${POD}" -n "${NAMESPACE}" | tail -40
+            done
+          fi
+
+      - name: Get Pod Logs
+        run: |
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          FILTER="${{ github.event.inputs.pod_filter }}"
+          LINES="${{ github.event.inputs.log_lines }}"
+          
+          echo "## 📜 Pod Logs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Get pods based on filter or unhealthy status
+          if [ -n "$FILTER" ]; then
+            PODS=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null | grep "$FILTER" | awk '{print $1}' | head -3)
+          else
+            # Get first 3 unhealthy pods
+            PODS=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null | grep -E "CrashLoopBackOff|Error|Pending|ImagePullBackOff|ErrImagePull" | awk '{print $1}' | head -3)
+          fi
+          
+          if [ -z "$PODS" ]; then
+            echo "No pods to get logs from" >> $GITHUB_STEP_SUMMARY
+          else
+            for POD in $PODS; do
+              echo "### Logs: ${POD}" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+              
+              # Try to get current logs
+              kubectl logs "${POD}" -n "${NAMESPACE}" --tail="${LINES}" 2>/dev/null >> $GITHUB_STEP_SUMMARY || {
+                echo "Failed to get current logs, trying previous container..." >> $GITHUB_STEP_SUMMARY
+                kubectl logs "${POD}" -n "${NAMESPACE}" --previous --tail="${LINES}" 2>/dev/null >> $GITHUB_STEP_SUMMARY || echo "No logs available"
+              }
+              
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              
+              # Output to log as well
+              echo "=== LOGS: ${POD} ==="
+              kubectl logs "${POD}" -n "${NAMESPACE}" --tail="${LINES}" 2>/dev/null || kubectl logs "${POD}" -n "${NAMESPACE}" --previous --tail="${LINES}" 2>/dev/null || echo "No logs"
+            done
+          fi
+
+      - name: Check Container Status
+        run: |
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          FILTER="${{ github.event.inputs.pod_filter }}"
+          
+          echo "## 🐳 Container Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -n "$FILTER" ]; then
+            PODS=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null | grep "$FILTER" | awk '{print $1}' | head -3)
+          else
+            PODS=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null | grep -E "CrashLoopBackOff|Error|Pending|ImagePullBackOff|ErrImagePull" | awk '{print $1}' | head -3)
+          fi
+          
+          for POD in $PODS; do
+            echo "### Container Status: ${POD}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+            kubectl get pod "${POD}" -n "${NAMESPACE}" -o jsonpath='{.status.containerStatuses}' 2>/dev/null | jq '.' >> $GITHUB_STEP_SUMMARY || echo "Unable to get container status"
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            # Output to log
+            echo "=== CONTAINER STATUS: ${POD} ==="
+            kubectl get pod "${POD}" -n "${NAMESPACE}" -o jsonpath='{.status.containerStatuses}' | jq '.'
+          done
+
+      - name: Resource Usage
+        run: |
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          
+          echo "## 📊 Resource Usage" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          kubectl top pods -n "${NAMESPACE}" 2>/dev/null >> $GITHUB_STEP_SUMMARY || echo "Metrics not available (metrics-server may not be installed)"
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Summary
+        run: |
+          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🔧 Quick Fixes" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Issue | Common Cause | Solution |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------------|----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| CrashLoopBackOff | App crashes on startup | Check logs for error, verify env vars & config |" >> $GITHUB_STEP_SUMMARY
+          echo "| ImagePullBackOff | Image not found or auth issue | Verify image tag exists in ECR |" >> $GITHUB_STEP_SUMMARY
+          echo "| Pending | Insufficient resources | Check node capacity and resource requests |" >> $GITHUB_STEP_SUMMARY
+          echo "| OOMKilled | Memory limit exceeded | Increase memory limits in deployment |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Namespace:** \`${NAMESPACE}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Run Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
