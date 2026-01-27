@@ -175,6 +175,13 @@ jobs:
         run: |
           aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
 
+      - name: Install ArgoCD CLI
+        run: |
+          curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd-linux-amd64
+          sudo mv argocd-linux-amd64 /usr/local/bin/argocd
+          argocd version --client
+
       - name: Fix ArgoCD Spoke Cluster Registration
         run: |
           echo "## 🔐 ArgoCD Cluster Registration Fix" >> $GITHUB_STEP_SUMMARY
@@ -182,30 +189,101 @@ jobs:
           
           SPOKE_CLUSTER="${{ env.SPOKE_CLUSTER }}"
           
-          # Delete bad cluster secret created by previous bootstrap (has wrong auth config)
-          BAD_SECRET="cluster-${SPOKE_CLUSTER}"
-          if kubectl get secret "$BAD_SECRET" -n argocd &>/dev/null; then
-            kubectl delete secret "$BAD_SECRET" -n argocd
-            echo "| Bad Secret | 🗑️ Deleted $BAD_SECRET (had wrong awsAuthConfig) |" >> $GITHUB_STEP_SUMMARY
+          # Delete ALL bad cluster secrets for the spoke cluster
+          echo "### Cleaning up bad cluster secrets" >> $GITHUB_STEP_SUMMARY
+          for SECRET in $(kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=cluster -o name 2>/dev/null || true); do
+            SECRET_NAME=$(echo "$SECRET" | sed 's|secret/||')
+            CLUSTER_NAME=$(kubectl get "$SECRET" -n argocd -o jsonpath='{.data.name}' 2>/dev/null | base64 -d 2>/dev/null || true)
+            CLUSTER_SERVER=$(kubectl get "$SECRET" -n argocd -o jsonpath='{.data.server}' 2>/dev/null | base64 -d 2>/dev/null || true)
+            
+            # Check if this is a spoke cluster secret (by name or server URL containing the spoke cluster API)
+            if echo "$CLUSTER_NAME" | grep -qiE "${SPOKE_CLUSTER}|opsera" || echo "$CLUSTER_SERVER" | grep -qi "eks.amazonaws.com"; then
+              echo "Found cluster secret: $SECRET_NAME (name: $CLUSTER_NAME)"
+              # Check if it has bad awsAuthConfig (empty roleARN)
+              CONFIG_JSON=$(kubectl get "$SECRET" -n argocd -o jsonpath='{.data.config}' 2>/dev/null | base64 -d 2>/dev/null || true)
+              if echo "$CONFIG_JSON" | grep -q "awsAuthConfig"; then
+                ROLE_ARN=$(echo "$CONFIG_JSON" | jq -r '.awsAuthConfig.roleARN // empty' 2>/dev/null || true)
+                if [ -z "$ROLE_ARN" ] || [ "$ROLE_ARN" = "null" ]; then
+                  kubectl delete secret "$SECRET_NAME" -n argocd
+                  echo "| $SECRET_NAME | 🗑️ Deleted (bad awsAuthConfig - no roleARN) |" >> $GITHUB_STEP_SUMMARY
+                fi
+              fi
+            fi
+          done
+          
+          # Get ArgoCD admin password
+          ARGOCD_PASSWORD=$(kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)
+          
+          if [ -z "$ARGOCD_PASSWORD" ]; then
+            echo "| ArgoCD Password | ⚠️ Could not get admin password |" >> $GITHUB_STEP_SUMMARY
+            # Try alternate secret
+            ARGOCD_PASSWORD=$(kubectl get secret argocd-secret -n argocd -o jsonpath='{.data.admin\.password}' 2>/dev/null | base64 -d 2>/dev/null || true)
           fi
           
-          # List all registered clusters
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Current Cluster Secrets" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=cluster \
-            -o custom-columns='NAME:.metadata.name,CLUSTER:.data.name' 2>/dev/null >> $GITHUB_STEP_SUMMARY || echo "No cluster secrets found" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          # Get ArgoCD server address
+          ARGOCD_SERVER=$(kubectl get svc argocd-server -n argocd -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+          if [ -z "$ARGOCD_SERVER" ]; then
+            ARGOCD_SERVER=$(kubectl get svc argocd-server -n argocd -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+          fi
           
-          # Check if the spoke cluster is now properly registered
-          CLUSTER_FOUND=$(kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=cluster -o json | \
-            jq -r '.items[].data.name' | base64 -d 2>/dev/null | grep -c "^${SPOKE_CLUSTER}$" || echo "0")
+          echo "ArgoCD Server: $ARGOCD_SERVER"
           
-          if [ "$CLUSTER_FOUND" -gt 0 ]; then
-            echo "| Spoke Cluster | ✅ ${SPOKE_CLUSTER} is registered |" >> $GITHUB_STEP_SUMMARY
+          # Port-forward to ArgoCD server in background
+          kubectl port-forward svc/argocd-server -n argocd 8080:443 &
+          PF_PID=$!
+          sleep 5
+          
+          # Login to ArgoCD
+          if [ -n "$ARGOCD_PASSWORD" ]; then
+            argocd login localhost:8080 --username admin --password "$ARGOCD_PASSWORD" --insecure || {
+              echo "| ArgoCD Login | ⚠️ Failed to login |" >> $GITHUB_STEP_SUMMARY
+              kill $PF_PID 2>/dev/null || true
+              exit 0
+            }
+            echo "| ArgoCD Login | ✅ Success |" >> $GITHUB_STEP_SUMMARY
+            
+            # List current clusters
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Current Registered Clusters (before fix)" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            argocd cluster list >> $GITHUB_STEP_SUMMARY 2>&1 || echo "Failed to list clusters" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            
+            # Check if spoke cluster is already registered AND working
+            CLUSTER_STATUS=$(argocd cluster list -o json 2>/dev/null | jq -r '.[] | select(.name == "'"${SPOKE_CLUSTER}"'") | .connectionState.status' || true)
+            
+            if [ "$CLUSTER_STATUS" != "Successful" ]; then
+              echo "Spoke cluster not properly registered (status: $CLUSTER_STATUS). Re-adding..."
+              
+              # First remove any existing registration
+              argocd cluster rm "$SPOKE_CLUSTER" --yes 2>/dev/null || true
+              
+              # Switch kubectl context to spoke cluster to add it
+              aws eks update-kubeconfig --name ${{ env.SPOKE_CLUSTER }} --region ${{ env.AWS_REGION }} --alias ${{ env.SPOKE_CLUSTER }}
+              
+              # Add the spoke cluster using argocd CLI (creates proper ServiceAccount-based auth)
+              argocd cluster add "$SPOKE_CLUSTER" --name "$SPOKE_CLUSTER" --yes --upsert
+              
+              echo "| Spoke Cluster | ✅ Re-registered with proper auth |" >> $GITHUB_STEP_SUMMARY
+              
+              # Switch back to hub cluster
+              aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
+              
+              # List clusters after fix
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### Registered Clusters (after fix)" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              argocd cluster list >> $GITHUB_STEP_SUMMARY 2>&1 || true
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| Spoke Cluster | ✅ Already registered and working |" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            # Cleanup port-forward
+            kill $PF_PID 2>/dev/null || true
           else
-            echo "| Spoke Cluster | ⚠️ ${SPOKE_CLUSTER} NOT registered |" >> $GITHUB_STEP_SUMMARY
-            echo "| Action Needed | Run: argocd cluster add ${SPOKE_CLUSTER} --name ${SPOKE_CLUSTER} |" >> $GITHUB_STEP_SUMMARY
+            echo "| ArgoCD Password | ⚠️ Not found - skipping cluster registration |" >> $GITHUB_STEP_SUMMARY
+            kill $PF_PID 2>/dev/null || true
           fi
           
           # Restart ArgoCD to clear cache
@@ -213,7 +291,7 @@ jobs:
           kubectl rollout restart deployment argocd-application-controller -n argocd 2>/dev/null || \
             kubectl rollout restart statefulset argocd-application-controller -n argocd 2>/dev/null || true
           kubectl rollout restart deployment argocd-server -n argocd 2>/dev/null || true
-          sleep 15
+          sleep 20
           echo "| ArgoCD | ✅ Restarted |" >> $GITHUB_STEP_SUMMARY
 
       - name: Setup ArgoCD Repository (Public Repo - No Auth Needed)
