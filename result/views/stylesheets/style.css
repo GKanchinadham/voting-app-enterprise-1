@@ -25,11 +25,11 @@ body{
 }
 
 #background-stats-1{
-  background-color: #2196f3;
+  background-color: #22c55e;  /* Green - Canary v8 */
 }
 
 #background-stats-2{
-  background-color: #00cbca;
+  background-color: #eab308;  /* Yellow - Canary v8 */
 }
 
 #content-container{
@@ -89,12 +89,12 @@ body{
 }
 
 #choice .choice.dogs{
-  color: #00cbca;
+  color: #eab308;  /* Yellow - Canary v8 */
   float: right;
 }
 
 #choice .choice.cats{
-  color: #2196f3;
+  color: #22c55e;  /* Green - Canary v8 */
   float: left;
 }
 #background-stats{
