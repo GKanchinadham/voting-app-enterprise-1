@@ -247,22 +247,58 @@ jobs:
           echo "### ✅ Deployment Verification" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          # Show initial app status for debugging
-          echo "--- ArgoCD Application Status ---"
-          kubectl get application "${APP_NAME}" -n argocd -o yaml 2>/dev/null | grep -A20 "status:" | head -30 || true
-          echo "---"
+          # Show FULL ArgoCD application status for debugging
+          echo "=========================================="
+          echo "FULL ArgoCD Application Status (YAML)"
+          echo "=========================================="
+          kubectl get application "${APP_NAME}" -n argocd -o yaml 2>/dev/null || true
+          echo "=========================================="
+          
+          # Show sync result details
+          echo ""
+          echo "=========================================="
+          echo "Sync Operation Details"
+          echo "=========================================="
+          kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.operationState}' 2>/dev/null | jq . || true
+          echo "=========================================="
+          
+          # Show resource status
+          echo ""
+          echo "=========================================="
+          echo "Resource Sync Status"
+          echo "=========================================="
+          kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.resources[*]}' 2>/dev/null | jq -s '.' || true
+          echo "=========================================="
+          
+          # Show conditions
+          echo ""
+          echo "=========================================="
+          echo "Application Conditions"
+          echo "=========================================="
+          kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.conditions}' 2>/dev/null | jq . || true
+          echo "=========================================="
           
           for i in $(seq 1 $MAX_ATTEMPTS); do
             SYNC=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
             HEALTH=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Unknown")
             
-            # Get sync error if any
+            # Get detailed sync error
             SYNC_ERROR=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.operationState.message}' 2>/dev/null || echo "")
+            SYNC_RESULT=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.operationState.syncResult.resources[*].message}' 2>/dev/null || echo "")
             CONDITION=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.conditions[0].message}' 2>/dev/null || echo "")
             
             echo "[$i/$MAX_ATTEMPTS] Sync: ${SYNC}, Health: ${HEALTH}"
             [ -n "$SYNC_ERROR" ] && echo "  -> Sync Error: ${SYNC_ERROR}"
+            [ -n "$SYNC_RESULT" ] && echo "  -> Sync Result: ${SYNC_RESULT}"
             [ -n "$CONDITION" ] && echo "  -> Condition: ${CONDITION}"
+            
+            # On first iteration, show detailed resource status
+            if [ "$i" -eq 1 ]; then
+              echo ""
+              echo "--- Resource Status ---"
+              kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | jq -r '.status.resources[] | "\(.kind)/\(.name): sync=\(.status) health=\(.health.status // "N/A")"' || true
+              echo "---"
+            fi
             
             if [ "$SYNC" = "Synced" ] && [ "$HEALTH" = "Healthy" ]; then
               echo "| Sync Status | ✅ ${SYNC} |" >> $GITHUB_STEP_SUMMARY
@@ -273,6 +309,21 @@ jobs:
             
             sleep 10
           done
+          
+          # Final detailed error dump
+          echo ""
+          echo "=========================================="
+          echo "FINAL ERROR DUMP - Sync Failed"
+          echo "=========================================="
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | jq '{
+            syncStatus: .status.sync.status,
+            healthStatus: .status.health.status,
+            operationMessage: .status.operationState.message,
+            operationPhase: .status.operationState.phase,
+            syncResultResources: [.status.operationState.syncResult.resources[]? | {kind, name, status, message}],
+            conditions: .status.conditions
+          }' || true
+          echo "=========================================="
           
           echo "| Sync Status | ⚠️ ${SYNC} |" >> $GITHUB_STEP_SUMMARY
           echo "| Health Status | ⚠️ ${HEALTH} |" >> $GITHUB_STEP_SUMMARY
