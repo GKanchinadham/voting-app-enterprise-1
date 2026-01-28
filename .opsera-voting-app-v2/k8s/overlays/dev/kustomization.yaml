@@ -14,43 +14,6 @@ resources:
   # Separate ingress for result app with path rewrite
   - result-ingress.yaml
 
-# Exclude StatefulSets from base (replaced by Deployments above)
-patchesStrategicMerge:
-  - |-
-    $patch: delete
-    apiVersion: apps/v1
-    kind: StatefulSet
-    metadata:
-      name: db
-  - |-
-    $patch: delete
-    apiVersion: apps/v1
-    kind: StatefulSet
-    metadata:
-      name: redis
-  # Replica patches - inline to avoid multi-doc file issue
-  - |-
-    apiVersion: apps/v1
-    kind: Deployment
-    metadata:
-      name: vote
-    spec:
-      replicas: 2
-  - |-
-    apiVersion: apps/v1
-    kind: Deployment
-    metadata:
-      name: result
-    spec:
-      replicas: 1
-  - |-
-    apiVersion: apps/v1
-    kind: Deployment
-    metadata:
-      name: worker
-    spec:
-      replicas: 1
-
 # Use labels transformer to avoid modifying immutable selectors
 labels:
   - pairs:
@@ -58,6 +21,48 @@ labels:
     includeSelectors: false
 
 patches:
+  # Remove StatefulSets (using Deployments with emptyDir for DEV)
+  - target:
+      kind: StatefulSet
+      name: db
+    patch: |
+      $patch: delete
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: db
+  - target:
+      kind: StatefulSet
+      name: redis
+    patch: |
+      $patch: delete
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: redis
+  # Replica patches
+  - target:
+      kind: Deployment
+      name: vote
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 2
+  - target:
+      kind: Deployment
+      name: result
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  - target:
+      kind: Deployment
+      name: worker
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  # Ingress patch
   - path: patch-ingress.yaml
 
 images:
