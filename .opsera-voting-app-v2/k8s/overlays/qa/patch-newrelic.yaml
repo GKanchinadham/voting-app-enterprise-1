@@ -2,27 +2,10 @@
 # ║  QA ENVIRONMENT - NEW RELIC CONFIGURATION PATCH                               ║
 # ║                                                                                ║
 # ║  Overrides the base New Relic app name for QA environment                      ║
+# ║  Note: In QA we use Rollouts instead of Deployments for vote/result            ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
-# Patch for vote deployment
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: vote
-spec:
-  template:
-    spec:
-      containers:
-      - name: vote
-        env:
-        - name: NEW_RELIC_APP_NAME
-          value: "vote-v2-qa"
-        - name: ENVIRONMENT
-          value: "qa"
-        - name: NEW_RELIC_LABELS
-          value: "Environment:qa;Team:platform"
----
-# Patch for vote rollout
+# Patch for vote rollout (Deployments are replaced by Rollouts in QA)
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 metadata:
@@ -45,3 +28,37 @@ spec:
         args:
         - name: app-name
           value: vote-v2-qa
+---
+# Patch for result rollout
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: result-rollout
+spec:
+  template:
+    spec:
+      containers:
+      - name: result
+        env:
+        - name: NEW_RELIC_APP_NAME
+          value: "result-v2-qa"
+        - name: ENVIRONMENT
+          value: "qa"
+        - name: NEW_RELIC_LABELS
+          value: "Environment:qa;Team:platform"
+---
+# Patch for worker deployment (worker stays as Deployment)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  template:
+    spec:
+      containers:
+      - name: worker
+        env:
+        - name: NEW_RELIC_APP_NAME
+          value: "worker-v2-qa"
+        - name: ENVIRONMENT
+          value: "qa"
