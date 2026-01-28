@@ -1,0 +1,160 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                    OPERATIONS: DEPLOY VOTING-APP-V2                          ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+name: "🚀 Ops: Deploy voting-app-v2"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - qa
+          - all
+
+env:
+  AWS_REGION: us-west-2
+  APP_NAME: voting-app-v2
+  HUB_CLUSTER: argocd-usw2
+  SPOKE_CLUSTER: opsera-usw2-np
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-v2:
+    name: "🚀 Deploy voting-app-v2"
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+
+      - name: Connect to Hub Cluster
+        run: aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
+
+      - name: Create ArgoCD Project
+        run: |
+          echo "## 🚀 Deploying voting-app-v2" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          PROJECT_FILE=".opsera-${{ env.APP_NAME }}/argocd/project.yaml"
+          
+          if [ -f "$PROJECT_FILE" ]; then
+            echo "Creating ArgoCD project..."
+            kubectl apply -f "$PROJECT_FILE"
+            echo "| ArgoCD Project | ✅ Created |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| ArgoCD Project | ⚠️ Not found: $PROJECT_FILE |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Deploy ArgoCD Applications
+        run: |
+          ENVS="${{ github.event.inputs.environment }}"
+          [ "$ENVS" = "all" ] && ENVS="dev qa"
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | Application | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------------|-------------|--------|" >> $GITHUB_STEP_SUMMARY
+          
+          for ENV in $ENVS; do
+            if [ "$ENV" = "dev" ]; then
+              MANIFEST=".opsera-${{ env.APP_NAME }}/argocd/application.yaml"
+            else
+              MANIFEST=".opsera-${{ env.APP_NAME }}/argocd/application-${ENV}.yaml"
+            fi
+            
+            if [ -f "$MANIFEST" ]; then
+              echo "Applying $MANIFEST..."
+              kubectl apply -f "$MANIFEST"
+              echo "| ${ENV} | voting-app-v2-${ENV} | ✅ Created |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| ${ENV} | voting-app-v2-${ENV} | ⚠️ Manifest not found |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+      - name: Setup Namespace on Spoke Cluster
+        run: |
+          aws eks update-kubeconfig --name ${{ env.SPOKE_CLUSTER }} --region ${{ env.AWS_REGION }}
+          
+          ENVS="${{ github.event.inputs.environment }}"
+          [ "$ENVS" = "all" ] && ENVS="dev qa"
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Namespaces" >> $GITHUB_STEP_SUMMARY
+          
+          for ENV in $ENVS; do
+            NS="${{ env.APP_NAME }}-${ENV}"
+            kubectl create namespace "$NS" 2>/dev/null || true
+            kubectl label namespace "$NS" app=${{ env.APP_NAME }} environment=${ENV} --overwrite
+            echo "| ${NS} | ✅ Ready |" >> $GITHUB_STEP_SUMMARY
+          done
+
+      - name: Trigger ArgoCD Sync
+        run: |
+          aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
+          
+          ENVS="${{ github.event.inputs.environment }}"
+          [ "$ENVS" = "all" ] && ENVS="dev qa"
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ArgoCD Sync Status" >> $GITHUB_STEP_SUMMARY
+          
+          for ENV in $ENVS; do
+            APP="${{ env.APP_NAME }}-${ENV}"
+            
+            # Hard refresh
+            kubectl annotate application "$APP" -n argocd argocd.argoproj.io/refresh=hard --overwrite 2>/dev/null || true
+            
+            # Trigger sync
+            kubectl patch application "$APP" -n argocd \
+              --type merge -p '{"operation":{"initiatedBy":{"username":"github-actions"},"sync":{"prune":true}}}' 2>/dev/null || true
+            
+            echo "| ${APP} | 🔄 Sync triggered |" >> $GITHUB_STEP_SUMMARY
+          done
+
+      - name: Wait and Verify
+        run: |
+          aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
+          
+          ENVS="${{ github.event.inputs.environment }}"
+          [ "$ENVS" = "all" ] && ENVS="dev qa"
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Deployment Status" >> $GITHUB_STEP_SUMMARY
+          
+          sleep 30
+          
+          for ENV in $ENVS; do
+            APP="${{ env.APP_NAME }}-${ENV}"
+            
+            SYNC=$(kubectl get application "$APP" -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+            HEALTH=$(kubectl get application "$APP" -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Unknown")
+            
+            echo "| ${APP} | Sync: ${SYNC} | Health: ${HEALTH} |" >> $GITHUB_STEP_SUMMARY
+          done
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Endpoints" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | Vote App | Results |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------------|----------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| DEV | https://opsera-voting-app-v2-dev.agent.opsera.dev | https://results.opsera-voting-app-v2-dev.agent.opsera.dev |" >> $GITHUB_STEP_SUMMARY
+          echo "| QA | https://opsera-voting-app-v2-qa.agent.opsera.dev | https://results.opsera-voting-app-v2-qa.agent.opsera.dev |" >> $GITHUB_STEP_SUMMARY
