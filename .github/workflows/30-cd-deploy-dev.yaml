@@ -188,29 +188,164 @@ jobs:
 
       - name: Sync ArgoCD Application
         run: |
+          set -x  # Enable command tracing for debugging
+          
           # Connect to hub cluster for ArgoCD operations
           aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
           
           APP_NAME="${{ env.APP_NAME }}-${{ env.ENVIRONMENT }}"
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           
-          # Clear any stuck operations
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+          echo "║                     ARGOCD SYNC - DEEP LOGGING ENABLED                       ║"
+          echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+          echo "Timestamp: ${TIMESTAMP}"
+          echo "Application: ${APP_NAME}"
+          echo ""
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # STEP 1: PRE-SYNC STATE CAPTURE
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ STEP 1: PRE-SYNC STATE CAPTURE                                             │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          echo "[1.1] Current Application Status (FULL YAML):"
+          echo "────────────────────────────────────────────────"
+          kubectl get application "${APP_NAME}" -n argocd -o yaml 2>&1 || echo "Application not found or error"
+          echo ""
+          
+          echo "[1.2] Current Sync Status:"
+          echo "────────────────────────────────────────────────"
+          CURRENT_SYNC=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+          CURRENT_HEALTH=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Unknown")
+          CURRENT_REVISION=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.sync.revision}' 2>/dev/null || echo "Unknown")
+          echo "  Sync Status: ${CURRENT_SYNC}"
+          echo "  Health Status: ${CURRENT_HEALTH}"
+          echo "  Current Revision: ${CURRENT_REVISION}"
+          echo ""
+          
+          echo "[1.3] Current Operation State:"
+          echo "────────────────────────────────────────────────"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | jq '.status.operationState // "No operation state"' || echo "Failed to get operation state"
+          echo ""
+          
+          echo "[1.4] Current Conditions:"
+          echo "────────────────────────────────────────────────"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | jq '.status.conditions // []' || echo "Failed to get conditions"
+          echo ""
+          
+          echo "[1.5] Source Configuration:"
+          echo "────────────────────────────────────────────────"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | jq '{repoURL: .spec.source.repoURL, path: .spec.source.path, targetRevision: .spec.source.targetRevision}' || echo "Failed to get source config"
+          echo ""
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # STEP 2: CLEAR STUCK OPERATIONS
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ STEP 2: CLEAR STUCK OPERATIONS                                             │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          echo "[2.1] Attempting to clear operationState..."
           kubectl patch application "${APP_NAME}" -n argocd \
-            --type merge -p '{"status":{"operationState":null}}' 2>/dev/null || true
+            --type merge -p '{"status":{"operationState":null}}' 2>&1 || echo "Note: Failed to clear operationState (may not exist)"
+          echo ""
           
-          sleep 2
+          echo "[2.2] Waiting 3 seconds..."
+          sleep 3
           
-          # Hard refresh to clear cache
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # STEP 3: HARD REFRESH
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ STEP 3: TRIGGER HARD REFRESH                                               │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          echo "[3.1] Setting refresh annotation to 'hard'..."
           kubectl patch application "${APP_NAME}" -n argocd \
-            --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}' || true
+            --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}' 2>&1 || echo "Failed to set hard refresh"
+          echo ""
           
+          echo "[3.2] Waiting 5 seconds for refresh to process..."
           sleep 5
           
-          # Trigger sync with prune and replace
-          kubectl patch application "${APP_NAME}" -n argocd \
-            --type merge -p '{"operation":{"initiatedBy":{"username":"github-actions"},"sync":{"prune":true,"syncStrategy":{"apply":{"force":true}}}}}' || true
+          echo "[3.3] Post-refresh status:"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | jq '{sync: .status.sync.status, health: .status.health.status, reconciledAt: .status.reconciledAt}' || echo "Failed to get status"
+          echo ""
           
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # STEP 4: TRIGGER SYNC
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ STEP 4: TRIGGER SYNC OPERATION                                             │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          SYNC_PAYLOAD='{"operation":{"initiatedBy":{"username":"github-actions","automated":false},"sync":{"prune":true,"syncStrategy":{"apply":{"force":true}}}}}'
+          echo "[4.1] Sync Payload: ${SYNC_PAYLOAD}"
+          echo ""
+          
+          echo "[4.2] Triggering sync..."
+          kubectl patch application "${APP_NAME}" -n argocd \
+            --type merge -p "${SYNC_PAYLOAD}" 2>&1 || echo "Failed to trigger sync"
+          echo ""
+          
+          echo "[4.3] Waiting 3 seconds..."
+          sleep 3
+          
+          echo "[4.4] Post-sync-trigger status:"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | jq '{
+            sync: .status.sync.status,
+            health: .status.health.status,
+            operationPhase: .status.operationState.phase,
+            operationMessage: .status.operationState.message
+          }' || echo "Failed to get status"
+          echo ""
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # STEP 5: MONITOR SYNC PROGRESS (10 iterations)
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ STEP 5: MONITOR SYNC PROGRESS                                              │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            echo ""
+            echo "[5.${i}] Sync Progress Check ($(date -u +"%H:%M:%S"))"
+            echo "────────────────────────────────────────────────"
+            
+            SYNC_STATUS=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Error")
+            HEALTH_STATUS=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Error")
+            OP_PHASE=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.operationState.phase}' 2>/dev/null || echo "None")
+            OP_MSG=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.operationState.message}' 2>/dev/null || echo "")
+            
+            echo "  Sync: ${SYNC_STATUS} | Health: ${HEALTH_STATUS} | Operation: ${OP_PHASE}"
+            [ -n "$OP_MSG" ] && echo "  Message: ${OP_MSG}"
+            
+            # Get resource sync status
+            echo "  Resources:"
+            kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | \
+              jq -r '.status.resources[]? | "    \(.kind)/\(.name): sync=\(.status) health=\(.health.status // "N/A")"' 2>/dev/null || true
+            
+            # Check if sync completed
+            if [ "$OP_PHASE" = "Succeeded" ] || [ "$OP_PHASE" = "Failed" ] || [ "$OP_PHASE" = "Error" ]; then
+              echo ""
+              echo "  >>> Sync operation completed with phase: ${OP_PHASE}"
+              break
+            fi
+            
+            sleep 5
+          done
+          
+          echo ""
           echo "### 🔄 ArgoCD Sync" >> $GITHUB_STEP_SUMMARY
           echo "Triggered sync for \`${APP_NAME}\`" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Final Sync Status | ${SYNC_STATUS} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Final Health Status | ${HEALTH_STATUS} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Operation Phase | ${OP_PHASE} |" >> $GITHUB_STEP_SUMMARY
 
   # ════════════════════════════════════════════════════════════════════════════════
   # VERIFY DEPLOYMENT
@@ -239,68 +374,214 @@ jobs:
       - name: Wait for Deployment
         id: verify
         run: |
+          set -x  # Enable command tracing
+          
           aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
           
           APP_NAME="${{ env.APP_NAME }}-${{ env.ENVIRONMENT }}"
+          NAMESPACE="${{ env.APP_NAME }}-${{ env.ENVIRONMENT }}"
           MAX_ATTEMPTS=30
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+          echo "║                  DEPLOYMENT VERIFICATION - DEEP LOGGING                      ║"
+          echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+          echo "Timestamp: ${TIMESTAMP}"
+          echo "Application: ${APP_NAME}"
+          echo "Namespace: ${NAMESPACE}"
+          echo ""
           
           echo "### ✅ Deployment Verification" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          # Show FULL ArgoCD application status for debugging
-          echo "=========================================="
-          echo "FULL ArgoCD Application Status (YAML)"
-          echo "=========================================="
-          kubectl get application "${APP_NAME}" -n argocd -o yaml 2>/dev/null || true
-          echo "=========================================="
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION A: FULL APPLICATION STATE DUMP
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ SECTION A: FULL APPLICATION STATE DUMP                                     │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
           
-          # Show sync result details
           echo ""
-          echo "=========================================="
-          echo "Sync Operation Details"
-          echo "=========================================="
-          kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.operationState}' 2>/dev/null | jq . || true
-          echo "=========================================="
+          echo "[A.1] Complete Application YAML:"
+          echo "═══════════════════════════════════════════════════════════════════════════════"
+          kubectl get application "${APP_NAME}" -n argocd -o yaml 2>&1 || echo "Failed to get application"
+          echo "═══════════════════════════════════════════════════════════════════════════════"
+          echo ""
           
-          # Show resource status
+          echo "[A.2] Application Summary:"
+          echo "────────────────────────────────────────────────"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | jq '{
+            name: .metadata.name,
+            namespace: .metadata.namespace,
+            project: .spec.project,
+            source: .spec.source,
+            destination: .spec.destination,
+            syncPolicy: .spec.syncPolicy,
+            syncStatus: .status.sync.status,
+            healthStatus: .status.health.status,
+            reconciledAt: .status.reconciledAt,
+            operationPhase: .status.operationState.phase,
+            operationStartedAt: .status.operationState.startedAt,
+            operationFinishedAt: .status.operationState.finishedAt,
+            operationMessage: .status.operationState.message
+          }' 2>/dev/null || echo "Failed to parse application"
           echo ""
-          echo "=========================================="
-          echo "Resource Sync Status"
-          echo "=========================================="
-          kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.resources[*]}' 2>/dev/null | jq -s '.' || true
-          echo "=========================================="
           
-          # Show conditions
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION B: OPERATION STATE DETAILS
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ SECTION B: OPERATION STATE DETAILS                                         │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
           echo ""
-          echo "=========================================="
-          echo "Application Conditions"
-          echo "=========================================="
-          kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.conditions}' 2>/dev/null | jq . || true
-          echo "=========================================="
+          echo "[B.1] Full Operation State:"
+          echo "────────────────────────────────────────────────"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | jq '.status.operationState // "No operation state"' || echo "Failed"
+          echo ""
+          
+          echo "[B.2] Sync Result Resources (if any):"
+          echo "────────────────────────────────────────────────"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | \
+            jq -r '.status.operationState.syncResult.resources[]? | "  \(.kind)/\(.name): \(.status) - \(.message // "OK")"' 2>/dev/null || echo "  No sync result resources"
+          echo ""
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION C: RESOURCE STATUS
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ SECTION C: RESOURCE STATUS                                                 │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          echo ""
+          echo "[C.1] All Resources Table:"
+          echo "────────────────────────────────────────────────"
+          printf "%-30s %-25s %-12s %-12s %s\n" "KIND" "NAME" "SYNC" "HEALTH" "MESSAGE"
+          echo "────────────────────────────────────────────────────────────────────────────────"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | \
+            jq -r '.status.resources[]? | "\(.kind)|\(.name)|\(.status)|\(.health.status // "N/A")|\(.health.message // "")"' 2>/dev/null | \
+            while IFS='|' read -r kind name status health message; do
+              printf "%-30s %-25s %-12s %-12s %s\n" "$kind" "$name" "$status" "$health" "$message"
+            done || echo "  No resources found"
+          echo ""
+          
+          echo "[C.2] Resources with Issues (OutOfSync or Unhealthy):"
+          echo "────────────────────────────────────────────────"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | \
+            jq -r '.status.resources[]? | select(.status != "Synced" or .health.status != "Healthy") | "  ⚠️ \(.kind)/\(.name): sync=\(.status) health=\(.health.status // "N/A") - \(.health.message // "")"' 2>/dev/null || echo "  No issues found"
+          echo ""
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION D: CONDITIONS
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ SECTION D: APPLICATION CONDITIONS                                          │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          echo ""
+          echo "[D.1] All Conditions:"
+          echo "────────────────────────────────────────────────"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | \
+            jq -r '.status.conditions[]? | "  Type: \(.type)\n  Message: \(.message)\n  LastTransitionTime: \(.lastTransitionTime)\n  ────"' 2>/dev/null || echo "  No conditions"
+          echo ""
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION E: KUBERNETES RESOURCE STATE (SPOKE CLUSTER)
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ SECTION E: KUBERNETES RESOURCE STATE (SPOKE CLUSTER)                       │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          # Switch to spoke cluster to check actual resources
+          aws eks update-kubeconfig --name ${{ env.SPOKE_CLUSTER }} --region ${{ env.AWS_REGION }}
+          
+          echo ""
+          echo "[E.1] Namespace Status:"
+          echo "────────────────────────────────────────────────"
+          kubectl get namespace "${NAMESPACE}" -o yaml 2>&1 || echo "  Namespace not found"
+          echo ""
+          
+          echo "[E.2] All Pods:"
+          echo "────────────────────────────────────────────────"
+          kubectl get pods -n "${NAMESPACE}" -o wide 2>&1 || echo "  No pods found"
+          echo ""
+          
+          echo "[E.3] Pod Details (with events):"
+          echo "────────────────────────────────────────────────"
+          for pod in $(kubectl get pods -n "${NAMESPACE}" -o name 2>/dev/null); do
+            echo ""
+            echo ">>> ${pod}:"
+            kubectl describe "${pod}" -n "${NAMESPACE}" 2>&1 | tail -50 || true
+            echo "────────────────────────────────────────────────"
+          done
+          echo ""
+          
+          echo "[E.4] Pod Logs (last 30 lines):"
+          echo "────────────────────────────────────────────────"
+          for pod in $(kubectl get pods -n "${NAMESPACE}" --no-headers -o custom-columns=":metadata.name" 2>/dev/null); do
+            echo ""
+            echo ">>> ${pod}:"
+            kubectl logs "${pod}" -n "${NAMESPACE}" --tail=30 2>&1 || echo "  Failed to get logs"
+            echo "────────────────────────────────────────────────"
+          done
+          echo ""
+          
+          echo "[E.5] Deployments:"
+          echo "────────────────────────────────────────────────"
+          kubectl get deployments -n "${NAMESPACE}" -o wide 2>&1 || echo "  No deployments found"
+          echo ""
+          
+          echo "[E.6] Services:"
+          echo "────────────────────────────────────────────────"
+          kubectl get services -n "${NAMESPACE}" -o wide 2>&1 || echo "  No services found"
+          echo ""
+          
+          echo "[E.7] Ingresses:"
+          echo "────────────────────────────────────────────────"
+          kubectl get ingress -n "${NAMESPACE}" -o wide 2>&1 || echo "  No ingresses found"
+          echo ""
+          
+          echo "[E.8] Events (last 20):"
+          echo "────────────────────────────────────────────────"
+          kubectl get events -n "${NAMESPACE}" --sort-by='.lastTimestamp' 2>&1 | tail -20 || echo "  No events"
+          echo ""
+          
+          # Switch back to hub cluster for ArgoCD monitoring
+          aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION F: VERIFICATION LOOP
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ SECTION F: VERIFICATION LOOP (${MAX_ATTEMPTS} attempts, 10s interval)      │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          echo ""
           
           for i in $(seq 1 $MAX_ATTEMPTS); do
             SYNC=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
             HEALTH=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Unknown")
-            
-            # Get detailed sync error
+            OP_PHASE=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.operationState.phase}' 2>/dev/null || echo "None")
             SYNC_ERROR=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.operationState.message}' 2>/dev/null || echo "")
-            SYNC_RESULT=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.operationState.syncResult.resources[*].message}' 2>/dev/null || echo "")
             CONDITION=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.conditions[0].message}' 2>/dev/null || echo "")
             
-            echo "[$i/$MAX_ATTEMPTS] Sync: ${SYNC}, Health: ${HEALTH}"
-            [ -n "$SYNC_ERROR" ] && echo "  -> Sync Error: ${SYNC_ERROR}"
-            [ -n "$SYNC_RESULT" ] && echo "  -> Sync Result: ${SYNC_RESULT}"
-            [ -n "$CONDITION" ] && echo "  -> Condition: ${CONDITION}"
+            echo "[F.${i}] $(date -u +"%H:%M:%S") | Sync: ${SYNC} | Health: ${HEALTH} | OpPhase: ${OP_PHASE}"
+            [ -n "$SYNC_ERROR" ] && echo "       Error: ${SYNC_ERROR}"
+            [ -n "$CONDITION" ] && echo "       Condition: ${CONDITION}"
             
-            # On first iteration, show detailed resource status
-            if [ "$i" -eq 1 ]; then
-              echo ""
-              echo "--- Resource Status ---"
-              kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | jq -r '.status.resources[] | "\(.kind)/\(.name): sync=\(.status) health=\(.health.status // "N/A")"' || true
-              echo "---"
+            # Show unhealthy resources on every 5th iteration
+            if [ $((i % 5)) -eq 0 ]; then
+              echo "       Unhealthy Resources:"
+              kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | \
+                jq -r '.status.resources[]? | select(.health.status != "Healthy" and .health.status != null) | "         ⚠️ \(.kind)/\(.name): \(.health.status)"' 2>/dev/null || true
             fi
             
             if [ "$SYNC" = "Synced" ] && [ "$HEALTH" = "Healthy" ]; then
+              echo ""
+              echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+              echo "║                     ✅ DEPLOYMENT VERIFICATION PASSED                        ║"
+              echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+              echo ""
               echo "| Sync Status | ✅ ${SYNC} |" >> $GITHUB_STEP_SUMMARY
               echo "| Health Status | 🟢 ${HEALTH} |" >> $GITHUB_STEP_SUMMARY
               echo "healthy=true" >> $GITHUB_OUTPUT
@@ -310,20 +591,47 @@ jobs:
             sleep 10
           done
           
-          # Final detailed error dump
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION G: FINAL ERROR DUMP (if failed)
+          # ═══════════════════════════════════════════════════════════════════════════════
           echo ""
-          echo "=========================================="
-          echo "FINAL ERROR DUMP - Sync Failed"
-          echo "=========================================="
+          echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+          echo "║                     ❌ DEPLOYMENT VERIFICATION FAILED                        ║"
+          echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+          
+          echo ""
+          echo "[G.1] Final Application State:"
+          echo "═══════════════════════════════════════════════════════════════════════════════"
           kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | jq '{
             syncStatus: .status.sync.status,
             healthStatus: .status.health.status,
-            operationMessage: .status.operationState.message,
             operationPhase: .status.operationState.phase,
+            operationMessage: .status.operationState.message,
             syncResultResources: [.status.operationState.syncResult.resources[]? | {kind, name, status, message}],
-            conditions: .status.conditions
-          }' || true
-          echo "=========================================="
+            conditions: .status.conditions,
+            unhealthyResources: [.status.resources[]? | select(.health.status != "Healthy") | {kind, name, health: .health}]
+          }' || echo "Failed to get final state"
+          echo "═══════════════════════════════════════════════════════════════════════════════"
+          
+          # Switch to spoke cluster for final pod check
+          aws eks update-kubeconfig --name ${{ env.SPOKE_CLUSTER }} --region ${{ env.AWS_REGION }}
+          
+          echo ""
+          echo "[G.2] Final Pod States:"
+          echo "────────────────────────────────────────────────"
+          kubectl get pods -n "${NAMESPACE}" -o wide 2>&1 || echo "  No pods"
+          echo ""
+          
+          echo "[G.3] Pods Not Ready:"
+          echo "────────────────────────────────────────────────"
+          kubectl get pods -n "${NAMESPACE}" -o json 2>/dev/null | \
+            jq -r '.items[]? | select(.status.phase != "Running") | "  \(.metadata.name): \(.status.phase) - \(.status.conditions[]? | select(.status != "True") | .type + ": " + .message)"' || echo "  None"
+          echo ""
+          
+          echo "[G.4] Recent Events with Errors:"
+          echo "────────────────────────────────────────────────"
+          kubectl get events -n "${NAMESPACE}" --field-selector type=Warning --sort-by='.lastTimestamp' 2>&1 | tail -10 || echo "  No warning events"
+          echo ""
           
           echo "| Sync Status | ⚠️ ${SYNC} |" >> $GITHUB_STEP_SUMMARY
           echo "| Health Status | ⚠️ ${HEALTH} |" >> $GITHUB_STEP_SUMMARY

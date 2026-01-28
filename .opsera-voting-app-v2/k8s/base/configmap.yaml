@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: voting-app-v2-config
+  labels:
+    app.kubernetes.io/name: voting-app-v2
+data:
+  # Vote service options
+  OPTION_A: "Cats"
+  OPTION_B: "Dogs"
+  # Database connection (service DNS)
+  POSTGRES_HOST: "db"
+  REDIS_HOST: "redis"

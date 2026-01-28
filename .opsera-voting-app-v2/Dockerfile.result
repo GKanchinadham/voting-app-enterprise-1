@@ -1,0 +1,44 @@
+# Enterprise Result Service Dockerfile
+# Node.js real-time results dashboard
+
+FROM node:18-slim AS base
+
+# Security: Add non-root user
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser
+
+# Add curl for healthcheck and tini for signal handling
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl tini && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/local/app
+
+# Install dependencies
+COPY result/package*.json ./
+RUN npm ci --only=production && \
+    npm cache clean --force
+
+# Production stage
+FROM base AS production
+
+# Copy application code
+COPY result/ .
+
+# Remove dev dependencies and files
+RUN rm -rf tests/ docker-compose.test.yml
+
+# Security: Change ownership to non-root user
+RUN chown -R appuser:appgroup /usr/local/app
+
+USER appuser
+
+# Health check endpoint (use 8080 - non-root can't bind to ports < 1024)
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:8080/ || exit 1
+
+ENV PORT=8080
+EXPOSE 8080
+
+# Use tini as init process for proper signal handling
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "server.js"]

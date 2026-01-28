@@ -1,5 +1,8 @@
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║                         OPERATIONS: DEBUG PODS                                ║
+# ║                                                                                ║
+# ║  Comprehensive debugging tool for investigating deployment issues             ║
+# ║  Includes: ArgoCD status, Pod status, Events, Logs, Resource descriptions     ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 name: "🔧 Ops: Debug Pods"
@@ -24,10 +27,16 @@ on:
         required: false
         default: '100'
         type: string
+      include_argocd:
+        description: 'Include ArgoCD diagnostic info'
+        required: false
+        type: boolean
+        default: true
 
 env:
   AWS_REGION: us-west-2
   APP_NAME: voting-app
+  HUB_CLUSTER: argocd-usw2
   SPOKE_CLUSTER: opsera-usw2-np
 
 permissions:
@@ -52,40 +61,295 @@ jobs:
           curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
           chmod +x kubectl && sudo mv kubectl /usr/local/bin/
 
-      - name: Connect to Cluster
+      - name: ArgoCD Diagnostic (Hub Cluster)
+        if: ${{ github.event.inputs.include_argocd == 'true' }}
+        run: |
+          set -x
+          
+          aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
+          
+          APP_NAME="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+          echo "║                    ARGOCD DIAGNOSTIC - DEEP LOGGING                          ║"
+          echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+          echo "Timestamp: ${TIMESTAMP}"
+          echo "Application: ${APP_NAME}"
+          echo ""
+          
+          echo "## 🔧 Debug Report - ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Generated: ${TIMESTAMP}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION A: ARGOCD APPLICATION STATUS
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ ARGOCD APPLICATION STATUS                                                  │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          echo "### ArgoCD Application Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "[A.1] Application Summary:"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | jq '{
+            name: .metadata.name,
+            project: .spec.project,
+            syncStatus: .status.sync.status,
+            healthStatus: .status.health.status,
+            revision: .status.sync.revision,
+            reconciledAt: .status.reconciledAt,
+            source: .spec.source,
+            destination: .spec.destination
+          }' 2>/dev/null || echo "Application not found"
+          echo ""
+          
+          # Summary table
+          SYNC=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+          HEALTH=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Unknown")
+          OP_PHASE=$(kubectl get application "${APP_NAME}" -n argocd -o jsonpath='{.status.operationState.phase}' 2>/dev/null || echo "None")
+          
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Sync Status | ${SYNC} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Health Status | ${HEALTH} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Operation Phase | ${OP_PHASE} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "[A.2] Full Application YAML:"
+          echo "═══════════════════════════════════════════════════════════════════════════════"
+          kubectl get application "${APP_NAME}" -n argocd -o yaml 2>&1 || echo "Failed"
+          echo "═══════════════════════════════════════════════════════════════════════════════"
+          echo ""
+          
+          echo "[A.3] Operation State:"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | jq '.status.operationState // "No operation"' || echo "Failed"
+          echo ""
+          
+          echo "[A.4] Conditions:"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | jq '.status.conditions // []' || echo "No conditions"
+          echo ""
+          
+          echo "[A.5] Resource Status Table:"
+          echo "────────────────────────────────────────────────────────────────────────────────"
+          printf "%-25s %-30s %-12s %-12s %s\n" "KIND" "NAME" "SYNC" "HEALTH" "MESSAGE"
+          echo "────────────────────────────────────────────────────────────────────────────────"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | \
+            jq -r '.status.resources[]? | "\(.kind)|\(.name)|\(.status)|\(.health.status // "N/A")|\(.health.message // "")"' | \
+            while IFS='|' read -r kind name status health message; do
+              printf "%-25s %-30s %-12s %-12s %s\n" "$kind" "$name" "$status" "$health" "${message:0:50}"
+            done || echo "No resources"
+          echo ""
+          
+          echo "[A.6] Resources with Issues:"
+          echo "────────────────────────────────────────────────────────────────────────────────"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | \
+            jq -r '.status.resources[]? | select(.status != "Synced" or .health.status != "Healthy") | "⚠️ \(.kind)/\(.name): sync=\(.status) health=\(.health.status // "N/A") - \(.health.message // "")"' || echo "None"
+          echo ""
+          
+          echo "[A.7] Sync Result (if available):"
+          kubectl get application "${APP_NAME}" -n argocd -o json 2>/dev/null | \
+            jq '.status.operationState.syncResult.resources // []' || echo "None"
+          echo ""
+
+      - name: Connect to Spoke Cluster
         run: aws eks update-kubeconfig --name ${{ env.SPOKE_CLUSTER }} --region ${{ env.AWS_REGION }}
 
-      - name: List Pods
+      - name: Kubernetes Resources Deep Debug
         run: |
-          NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
+          set -x
           
-          echo "## 🔧 Pod Debug - ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### All Pods" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          kubectl get pods -n "${NAMESPACE}" -o wide >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-
-      - name: Check Unhealthy Pods
-        run: |
           NAMESPACE="${{ env.APP_NAME }}-${{ github.event.inputs.environment }}"
           FILTER="${{ github.event.inputs.pod_filter }}"
           LOG_LINES="${{ github.event.inputs.log_lines }}"
           
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+          echo "║                    KUBERNETES RESOURCES - DEEP LOGGING                       ║"
+          echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+          echo "Namespace: ${NAMESPACE}"
+          echo ""
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION B: NAMESPACE STATUS
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ NAMESPACE STATUS                                                           │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          echo "[B.1] Namespace:"
+          kubectl get namespace "${NAMESPACE}" -o yaml 2>&1 || echo "Namespace not found"
+          echo ""
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION C: ALL RESOURCES
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ ALL RESOURCES IN NAMESPACE                                                 │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          echo "[C.1] All Resources:"
+          kubectl get all -n "${NAMESPACE}" -o wide 2>&1 || echo "No resources"
+          echo ""
+          
+          echo "### All Resources" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          kubectl get all -n "${NAMESPACE}" -o wide 2>&1 >> $GITHUB_STEP_SUMMARY || echo "No resources" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Pod Logs" >> $GITHUB_STEP_SUMMARY
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION D: PODS DETAILED
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ PODS DETAILED STATUS                                                       │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          echo "[D.1] Pod List:"
+          kubectl get pods -n "${NAMESPACE}" -o wide 2>&1 || echo "No pods"
+          echo ""
+          
+          echo "[D.2] Pod Details (JSON):"
+          kubectl get pods -n "${NAMESPACE}" -o json 2>/dev/null | jq '[.items[] | {
+            name: .metadata.name,
+            phase: .status.phase,
+            ready: ([.status.containerStatuses[]? | select(.ready)] | length),
+            total: ([.status.containerStatuses[]?] | length),
+            restarts: ([.status.containerStatuses[]?.restartCount] | add),
+            age: .metadata.creationTimestamp,
+            conditions: [.status.conditions[]? | select(.status != "True") | {type: .type, reason: .reason, message: .message}],
+            containerStatuses: [.status.containerStatuses[]? | {name: .name, ready: .ready, state: .state}]
+          }]' 2>/dev/null || echo "No pods"
+          echo ""
+          
+          echo "[D.3] Pods Not Ready:"
+          kubectl get pods -n "${NAMESPACE}" -o json 2>/dev/null | \
+            jq -r '.items[]? | select(.status.phase != "Running" or ([.status.containerStatuses[]? | select(.ready == false)] | length > 0)) | "  ⚠️ \(.metadata.name): \(.status.phase) - \(.status.conditions[]? | select(.status != "True") | .type + ": " + .message)"' || echo "All pods ready"
+          echo ""
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION E: POD DESCRIPTIONS
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ POD DESCRIPTIONS                                                           │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
           
           if [ -n "$FILTER" ]; then
-            PODS=$(kubectl get pods -n "${NAMESPACE}" -o name | grep "$FILTER")
+            PODS=$(kubectl get pods -n "${NAMESPACE}" -o name 2>/dev/null | grep "$FILTER" || true)
           else
-            PODS=$(kubectl get pods -n "${NAMESPACE}" -o name | head -5)
+            PODS=$(kubectl get pods -n "${NAMESPACE}" -o name 2>/dev/null | head -10)
           fi
           
           for POD in $PODS; do
             POD_NAME=$(basename "$POD")
+            echo ""
+            echo "[E] Pod: ${POD_NAME}"
+            echo "════════════════════════════════════════════════════════════════════════════"
+            kubectl describe "${POD}" -n "${NAMESPACE}" 2>&1 | tail -80 || echo "Failed"
+            echo ""
+          done
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION F: POD LOGS
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ POD LOGS                                                                   │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          echo "### Pod Logs" >> $GITHUB_STEP_SUMMARY
+          
+          for POD in $PODS; do
+            POD_NAME=$(basename "$POD")
+            echo ""
+            echo "[F] Logs: ${POD_NAME} (last ${LOG_LINES} lines)"
+            echo "════════════════════════════════════════════════════════════════════════════"
+            kubectl logs "${POD}" -n "${NAMESPACE}" --tail="${LOG_LINES}" 2>&1 || echo "No logs"
+            echo ""
+            
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "#### ${POD_NAME}" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-            kubectl logs "${POD}" -n "${NAMESPACE}" --tail="${LOG_LINES}" 2>&1 | head -100 >> $GITHUB_STEP_SUMMARY || echo "No logs available"
+            kubectl logs "${POD}" -n "${NAMESPACE}" --tail=50 2>&1 | head -50 >> $GITHUB_STEP_SUMMARY || echo "No logs" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           done
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION G: EVENTS
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ KUBERNETES EVENTS                                                          │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          echo "[G.1] All Events (sorted by time):"
+          kubectl get events -n "${NAMESPACE}" --sort-by='.lastTimestamp' 2>&1 || echo "No events"
+          echo ""
+          
+          echo "[G.2] Warning Events:"
+          kubectl get events -n "${NAMESPACE}" --field-selector type=Warning --sort-by='.lastTimestamp' 2>&1 || echo "No warnings"
+          echo ""
+          
+          echo "### Recent Events" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          kubectl get events -n "${NAMESPACE}" --sort-by='.lastTimestamp' 2>&1 | tail -20 >> $GITHUB_STEP_SUMMARY || echo "No events" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION H: DEPLOYMENTS & ROLLOUTS
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ DEPLOYMENTS & ROLLOUTS                                                     │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          echo "[H.1] Deployments:"
+          kubectl get deployments -n "${NAMESPACE}" -o wide 2>&1 || echo "No deployments"
+          echo ""
+          
+          echo "[H.2] Rollouts (if Argo Rollouts installed):"
+          kubectl get rollouts -n "${NAMESPACE}" -o wide 2>&1 || echo "No rollouts or Argo Rollouts not installed"
+          echo ""
+          
+          echo "[H.3] ReplicaSets:"
+          kubectl get replicasets -n "${NAMESPACE}" -o wide 2>&1 || echo "No replicasets"
+          echo ""
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION I: SERVICES & INGRESSES
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ SERVICES & INGRESSES                                                       │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          echo "[I.1] Services:"
+          kubectl get services -n "${NAMESPACE}" -o wide 2>&1 || echo "No services"
+          echo ""
+          
+          echo "[I.2] Ingresses:"
+          kubectl get ingress -n "${NAMESPACE}" -o wide 2>&1 || echo "No ingresses"
+          echo ""
+          
+          echo "[I.3] Ingress Details:"
+          kubectl get ingress -n "${NAMESPACE}" -o yaml 2>&1 || echo "No ingresses"
+          echo ""
+          
+          # ═══════════════════════════════════════════════════════════════════════════════
+          # SECTION J: CONFIGMAPS & SECRETS
+          # ═══════════════════════════════════════════════════════════════════════════════
+          echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+          echo "│ CONFIGMAPS & SECRETS                                                       │"
+          echo "└─────────────────────────────────────────────────────────────────────────────┘"
+          
+          echo "[J.1] ConfigMaps:"
+          kubectl get configmaps -n "${NAMESPACE}" 2>&1 || echo "No configmaps"
+          echo ""
+          
+          echo "[J.2] Secrets (names only):"
+          kubectl get secrets -n "${NAMESPACE}" 2>&1 || echo "No secrets"
+          echo ""
+          
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+          echo "║                         DEBUG COMPLETE                                       ║"
+          echo "╚══════════════════════════════════════════════════════════════════════════════╝"

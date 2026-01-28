@@ -1,0 +1,68 @@
+# ============================================================================
+# HTTP-Based Analysis Template (No Prometheus Required)
+# ============================================================================
+# Use this template when Prometheus is not available in your cluster.
+# It performs simple HTTP health checks instead of metrics-based analysis.
+# ============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: http-health-check
+  labels:
+    app.kubernetes.io/part-of: voting-app-v2
+    analysis-type: http-based
+spec:
+  args:
+  - name: service-name
+  - name: namespace
+    value: "voting-app-v2-qa"  # Default, can be overridden
+  
+  metrics:
+  # ─────────────────────────────────────────────────────────────────────────
+  # METRIC 1: HTTP Health Check
+  # Verifies the service endpoint returns HTTP 200
+  # ─────────────────────────────────────────────────────────────────────────
+  - name: http-health
+    interval: 30s
+    count: 5
+    successCondition: result.status == 200
+    failureLimit: 3
+    provider:
+      web:
+        url: "http://{{args.service-name}}.{{args.namespace}}.svc.cluster.local/"
+        method: GET
+        timeoutSeconds: 10
+        headers:
+        - key: "User-Agent"
+          value: "Argo-Rollouts-Analysis"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # METRIC 2: Response Time Check
+  # Verifies response time is under threshold (measured via job duration)
+  # ─────────────────────────────────────────────────────────────────────────
+  - name: response-time
+    interval: 30s
+    count: 5
+    # Job provider runs a command and checks exit code
+    # curl --max-time enforces response time limit
+    successCondition: result.exitCode == 0
+    failureLimit: 2
+    provider:
+      job:
+        spec:
+          backoffLimit: 0
+          template:
+            spec:
+              restartPolicy: Never
+              containers:
+              - name: curl
+                image: curlimages/curl:8.5.0
+                command:
+                - /bin/sh
+                - -c
+                - |
+                  # Fail if response takes more than 2 seconds
+                  curl -sf --max-time 2 \
+                    "http://{{args.service-name}}.{{args.namespace}}.svc.cluster.local/" \
+                    -o /dev/null
+                  exit $?

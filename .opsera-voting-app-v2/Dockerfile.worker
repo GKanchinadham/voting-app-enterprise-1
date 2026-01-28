@@ -1,0 +1,40 @@
+# Enterprise Worker Service Dockerfile
+# .NET Core background vote processor
+
+# Build stage - always on amd64 (dotnet limitation)
+FROM --platform=${BUILDPLATFORM} mcr.microsoft.com/dotnet/sdk:7.0 AS build
+ARG TARGETPLATFORM
+ARG TARGETARCH
+ARG BUILDPLATFORM
+
+WORKDIR /source
+
+# Copy project file and restore dependencies
+COPY worker/*.csproj .
+RUN dotnet restore -a $TARGETARCH
+
+# Copy source and build
+COPY worker/ .
+RUN dotnet publish -c release -o /app -a $TARGETARCH --self-contained false --no-restore
+
+# Production stage
+FROM mcr.microsoft.com/dotnet/runtime:7.0 AS production
+
+# Security: Add non-root user
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser
+
+WORKDIR /app
+
+# Copy built application
+COPY --from=build /app .
+
+# Security: Change ownership
+RUN chown -R appuser:appgroup /app
+
+USER appuser
+
+# Health check - worker doesn't have HTTP endpoint, check process
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD pgrep -f Worker.dll || exit 1
+
+ENTRYPOINT ["dotnet", "Worker.dll"]

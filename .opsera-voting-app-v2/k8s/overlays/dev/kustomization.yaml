@@ -1,0 +1,72 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: voting-app-v2-dev
+
+namespace: voting-app-v2-dev
+
+resources:
+  - ../../base
+  # Dev-only: Use Deployments with emptyDir instead of StatefulSets (no EBS CSI driver)
+  - db-deployment.yaml
+  - redis-deployment.yaml
+  # Separate ingress for result app with path rewrite
+  - result-ingress.yaml
+
+# Exclude StatefulSets from base (replaced by Deployments above)
+patchesStrategicMerge:
+  - |-
+    $patch: delete
+    apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: db
+  - |-
+    $patch: delete
+    apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: redis
+  # Replica patches - inline to avoid multi-doc file issue
+  - |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: vote
+    spec:
+      replicas: 2
+  - |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: result
+    spec:
+      replicas: 1
+  - |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: worker
+    spec:
+      replicas: 1
+
+# Use labels transformer to avoid modifying immutable selectors
+labels:
+  - pairs:
+      environment: dev
+    includeSelectors: false
+
+patches:
+  - path: patch-ingress.yaml
+
+images:
+  - name: vote
+    newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/vote
+    newTag: latest
+  - name: result
+    newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/result
+    newTag: latest
+  - name: worker
+    newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/worker
+    newTag: latest

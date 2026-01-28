@@ -1,0 +1,28 @@
+# Patch for main vote ingress - DEV environment
+# Uses -dev suffix for consistency with QA (-qa suffix)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: voting-app-v2
+  labels:
+    environment: dev
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - opsera-voting-app-v2-dev.agent.opsera.dev
+    secretName: voting-app-v2-dev-tls
+  rules:
+  - host: opsera-voting-app-v2-dev.agent.opsera.dev
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: vote
+            port:
+              number: 80

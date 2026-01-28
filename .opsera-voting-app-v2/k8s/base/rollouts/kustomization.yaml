@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: voting-app-v2-rollouts
+
+resources:
+  - vote-rollout.yaml
+  - result-rollout.yaml
+  - vote-canary-service.yaml
+  - result-canary-service.yaml
+  - analysis-template.yaml
+  - analysis-template-http.yaml  # Fallback when Prometheus is not available
+  - analysis-template-newrelic.yaml  # New Relic integration for canary analysis
+
+# Use labels transformer to avoid modifying selectors
+# commonLabels adds to both metadata AND selectors, which breaks Argo Rollouts
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: voting-app-v2
+      deployment-strategy: canary
+    includeSelectors: false

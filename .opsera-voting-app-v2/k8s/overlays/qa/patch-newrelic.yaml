@@ -1,0 +1,47 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  QA ENVIRONMENT - NEW RELIC CONFIGURATION PATCH                               ║
+# ║                                                                                ║
+# ║  Overrides the base New Relic app name for QA environment                      ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+# Patch for vote deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vote
+spec:
+  template:
+    spec:
+      containers:
+      - name: vote
+        env:
+        - name: NEW_RELIC_APP_NAME
+          value: "vote-v2-qa"
+        - name: ENVIRONMENT
+          value: "qa"
+        - name: NEW_RELIC_LABELS
+          value: "Environment:qa;Team:platform"
+---
+# Patch for vote rollout
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: vote-rollout
+spec:
+  template:
+    spec:
+      containers:
+      - name: vote
+        env:
+        - name: NEW_RELIC_APP_NAME
+          value: "vote-v2-qa"
+        - name: ENVIRONMENT
+          value: "qa"
+        - name: NEW_RELIC_LABELS
+          value: "Environment:qa;Team:platform"
+  strategy:
+    canary:
+      analysis:
+        args:
+        - name: app-name
+          value: vote-v2-qa

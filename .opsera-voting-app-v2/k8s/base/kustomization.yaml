@@ -1,0 +1,44 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: voting-app-v2-base
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secrets.yaml
+  - newrelic-secret.yaml  # New Relic API key for canary analysis
+  - newrelic-configmap.yaml  # New Relic agent configuration
+  # Frontend services
+  - vote-deployment.yaml
+  - vote-service.yaml
+  - result-deployment.yaml
+  - result-service.yaml
+  # Backend services
+  - worker-deployment.yaml
+  # Database services (StatefulSets)
+  - redis-statefulset.yaml
+  - redis-service.yaml
+  - db-statefulset.yaml
+  - db-service.yaml
+  # Ingress
+  - ingress.yaml
+
+# Use labels transformer to avoid modifying immutable selectors
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: voting-app-v2
+      app.kubernetes.io/managed-by: argocd
+    includeSelectors: false
+
+images:
+  - name: vote
+    newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/vote
+    newTag: latest
+  - name: result
+    newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/result
+    newTag: latest
+  - name: worker
+    newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/worker
+    newTag: latest

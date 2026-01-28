@@ -1,0 +1,67 @@
+# QA environment replica counts for Argo Rollouts
+# Higher replicas for proper canary traffic distribution
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: vote-rollout
+spec:
+  replicas: 4  # QA: Higher for better canary traffic distribution
+  strategy:
+    canary:
+      # Canary traffic shifting: 10% -> 30% -> 60% -> 100%
+      steps:
+      - setWeight: 10
+      - pause: {duration: 2m}
+      - setWeight: 30
+      - pause: {duration: 2m}
+      - setWeight: 60
+      - pause: {duration: 2m}
+      - setWeight: 100
+      # Analysis template for automated rollback
+      analysis:
+        templates:
+        - templateName: success-rate
+        startingStep: 1
+        args:
+        - name: service-name
+          value: vote
+      # Traffic routing with NGINX Ingress
+      trafficRouting:
+        nginx:
+          stableIngress: voting-app-v2
+          annotationPrefix: nginx.ingress.kubernetes.io
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: result-rollout
+spec:
+  replicas: 3  # QA: Multiple replicas for canary
+  strategy:
+    canary:
+      steps:
+      - setWeight: 10
+      - pause: {duration: 2m}
+      - setWeight: 30
+      - pause: {duration: 2m}
+      - setWeight: 60
+      - pause: {duration: 2m}
+      - setWeight: 100
+      analysis:
+        templates:
+        - templateName: success-rate
+        startingStep: 1
+        args:
+        - name: service-name
+          value: result
+      trafficRouting:
+        nginx:
+          stableIngress: voting-app-v2-result
+          annotationPrefix: nginx.ingress.kubernetes.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  replicas: 2  # QA: Multiple workers for queue processing
