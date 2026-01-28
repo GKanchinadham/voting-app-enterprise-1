@@ -177,6 +177,8 @@ jobs:
 
       - name: Register Spoke Cluster with ArgoCD
         run: |
+          set -x  # Enable debug logging
+          
           echo "## 🔐 ArgoCD Cluster Registration" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
@@ -185,8 +187,8 @@ jobs:
           
           # Check if spoke cluster secret already exists with correct name
           echo "### Checking existing cluster registrations" >> $GITHUB_STEP_SUMMARY
-          kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=cluster \
-            -o custom-columns='NAME:.metadata.name,CLUSTER:.data.name' 2>/dev/null || true
+          echo "Looking for cluster secrets in argocd namespace..."
+          kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=cluster -o wide 2>/dev/null || echo "No cluster secrets found"
           
           # Get the Spoke cluster API server URL
           SPOKE_SERVER=$(aws eks describe-cluster --name "$SPOKE_CLUSTER" --region ${{ env.AWS_REGION }} \
@@ -196,46 +198,44 @@ jobs:
             --query 'cluster.certificateAuthority.data' --output text)
           
           echo "Spoke Server: $SPOKE_SERVER"
+          echo "| Spoke Server | ${SPOKE_SERVER} |" >> $GITHUB_STEP_SUMMARY
           
-          # Check if there's already a working registration for this cluster
-          EXISTING_SECRET=$(kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=cluster -o json | \
-            jq -r --arg server "$SPOKE_SERVER" '.items[] | select(.data.server | @base64d == $server) | .metadata.name' 2>/dev/null || true)
+          # ALWAYS recreate the cluster secret to ensure correct name
+          # This fixes the "there are no clusters with this name" error
+          echo "Force-creating cluster secret with name: ${SPOKE_CLUSTER}"
           
-          if [ -n "$EXISTING_SECRET" ]; then
-            echo "Found existing cluster secret: $EXISTING_SECRET for $SPOKE_SERVER"
-            echo "| Existing Secret | $EXISTING_SECRET |" >> $GITHUB_STEP_SUMMARY
+          # Delete any existing secrets for this cluster (by name or server)
+          for secret in $(kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=cluster -o name 2>/dev/null); do
+            SECRET_SERVER=$(kubectl get "$secret" -n argocd -o jsonpath='{.data.server}' 2>/dev/null | base64 -d 2>/dev/null || true)
+            SECRET_NAME_VAL=$(kubectl get "$secret" -n argocd -o jsonpath='{.data.name}' 2>/dev/null | base64 -d 2>/dev/null || true)
             
-            # Check if it's working (no bad awsAuthConfig)
-            CONFIG=$(kubectl get secret "$EXISTING_SECRET" -n argocd -o jsonpath='{.data.config}' 2>/dev/null | base64 -d 2>/dev/null || true)
-            if echo "$CONFIG" | grep -q '"bearerToken"'; then
-              echo "| Status | ✅ Has valid bearerToken auth |" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "| Status | ⚠️ May need reconfiguration |" >> $GITHUB_STEP_SUMMARY
+            if [ "$SECRET_SERVER" = "$SPOKE_SERVER" ] || [ "$SECRET_NAME_VAL" = "$SPOKE_CLUSTER" ]; then
+              echo "Deleting existing cluster secret: $secret (server=$SECRET_SERVER, name=$SECRET_NAME_VAL)"
+              kubectl delete "$secret" -n argocd 2>/dev/null || true
+              echo "| Deleted | $secret |" >> $GITHUB_STEP_SUMMARY
             fi
-          else
-            echo "No existing cluster secret found for $SPOKE_SERVER"
-            echo "| Spoke Cluster | ⚠️ Not registered |" >> $GITHUB_STEP_SUMMARY
-            
-            # Create ServiceAccount and ClusterRoleBinding on spoke cluster
-            echo "Creating ArgoCD manager ServiceAccount on spoke cluster..."
-            
-            # Switch to spoke cluster
-            aws eks update-kubeconfig --name "$SPOKE_CLUSTER" --region ${{ env.AWS_REGION }}
-            
-            # Create namespace if needed
-            kubectl create namespace argocd-manager 2>/dev/null || true
-            
-            # Create ServiceAccount
-            kubectl apply -f - <<EOSA
+          done
+          
+          # Also delete by expected name
+          kubectl delete secret "${SECRET_NAME}" -n argocd 2>/dev/null || true
+          
+          # Create ServiceAccount and ClusterRoleBinding on spoke cluster
+          echo "Creating ArgoCD manager ServiceAccount on spoke cluster..."
+          
+          # Switch to spoke cluster
+          aws eks update-kubeconfig --name "$SPOKE_CLUSTER" --region ${{ env.AWS_REGION }}
+          
+          # Create ServiceAccount (idempotent)
+          kubectl apply -f - <<'EOSA'
           apiVersion: v1
           kind: ServiceAccount
           metadata:
             name: argocd-manager
             namespace: kube-system
           EOSA
-            
-            # Create ClusterRoleBinding for cluster-admin access
-            kubectl apply -f - <<EOCRB
+          
+          # Create ClusterRoleBinding for cluster-admin access (idempotent)
+          kubectl apply -f - <<'EOCRB'
           apiVersion: rbac.authorization.k8s.io/v1
           kind: ClusterRoleBinding
           metadata:
@@ -249,9 +249,13 @@ jobs:
             name: argocd-manager
             namespace: kube-system
           EOCRB
-            
-            # Create token secret for the ServiceAccount (Kubernetes 1.24+)
-            kubectl apply -f - <<EOSEC
+          
+          # Delete old token secret and recreate (to get fresh token)
+          kubectl delete secret argocd-manager-token -n kube-system 2>/dev/null || true
+          sleep 2
+          
+          # Create token secret for the ServiceAccount (Kubernetes 1.24+)
+          kubectl apply -f - <<'EOSEC'
           apiVersion: v1
           kind: Secret
           metadata:
@@ -261,25 +265,39 @@ jobs:
               kubernetes.io/service-account.name: argocd-manager
           type: kubernetes.io/service-account-token
           EOSEC
-            
-            # Wait for token to be populated
-            sleep 5
-            
-            # Get the token
-            SA_TOKEN=$(kubectl get secret argocd-manager-token -n kube-system -o jsonpath='{.data.token}' | base64 -d)
-            
-            if [ -z "$SA_TOKEN" ]; then
-              echo "| Error | ❌ Failed to get ServiceAccount token |" >> $GITHUB_STEP_SUMMARY
-              exit 1
+          
+          # Wait for token to be populated
+          echo "Waiting for ServiceAccount token..."
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            SA_TOKEN=$(kubectl get secret argocd-manager-token -n kube-system -o jsonpath='{.data.token}' 2>/dev/null | base64 -d 2>/dev/null || true)
+            if [ -n "$SA_TOKEN" ]; then
+              echo "Token obtained on attempt $i"
+              break
             fi
-            
-            echo "| ServiceAccount | ✅ Created argocd-manager with token |" >> $GITHUB_STEP_SUMMARY
-            
-            # Switch back to hub cluster
-            aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
-            
-            # Create the ArgoCD cluster secret
-            kubectl apply -f - <<EOCLUSTER
+            sleep 2
+          done
+          
+          if [ -z "$SA_TOKEN" ]; then
+            echo "| Error | ❌ Failed to get ServiceAccount token |" >> $GITHUB_STEP_SUMMARY
+            echo "Trying alternative method..."
+            # Try getting token directly from ServiceAccount
+            SA_TOKEN=$(kubectl create token argocd-manager -n kube-system --duration=8760h 2>/dev/null || true)
+          fi
+          
+          if [ -z "$SA_TOKEN" ]; then
+            echo "| Error | ❌ All token methods failed |" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          
+          echo "| ServiceAccount | ✅ Token obtained (${#SA_TOKEN} chars) |" >> $GITHUB_STEP_SUMMARY
+          
+          # Switch back to hub cluster
+          aws eks update-kubeconfig --name ${{ env.HUB_CLUSTER }} --region ${{ env.AWS_REGION }}
+          
+          # Create the ArgoCD cluster secret with EXACT name matching what apps expect
+          echo "Creating ArgoCD cluster secret: ${SECRET_NAME} with cluster name: ${SPOKE_CLUSTER}"
+          
+          cat <<EOCLUSTER | kubectl apply -f -
           apiVersion: v1
           kind: Secret
           metadata:
@@ -300,8 +318,19 @@ jobs:
                 }
               }
           EOCLUSTER
-            
-            echo "| Cluster Secret | ✅ Created ${SECRET_NAME} |" >> $GITHUB_STEP_SUMMARY
+          
+          echo "| Cluster Secret | ✅ Created ${SECRET_NAME} |" >> $GITHUB_STEP_SUMMARY
+          
+          # Verify the secret was created correctly
+          echo ""
+          echo "Verifying cluster secret..."
+          kubectl get secret "${SECRET_NAME}" -n argocd -o yaml
+          
+          CREATED_NAME=$(kubectl get secret "${SECRET_NAME}" -n argocd -o jsonpath='{.data.name}' | base64 -d)
+          echo "| Cluster Name in Secret | ${CREATED_NAME} |" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$CREATED_NAME" != "$SPOKE_CLUSTER" ]; then
+            echo "| Warning | ❌ Name mismatch: expected ${SPOKE_CLUSTER}, got ${CREATED_NAME} |" >> $GITHUB_STEP_SUMMARY
           fi
           
           # List final cluster secrets
@@ -309,16 +338,31 @@ jobs:
           echo "### Final Cluster Secrets" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=cluster \
-            -o custom-columns='NAME:.metadata.name,CLUSTER:.data.name' 2>/dev/null >> $GITHUB_STEP_SUMMARY || true
+            -o custom-columns='NAME:.metadata.name,CLUSTER-NAME:.data.name' 2>/dev/null >> $GITHUB_STEP_SUMMARY || true
           echo '```' >> $GITHUB_STEP_SUMMARY
           
-          # Restart ArgoCD to pick up new cluster secret
-          echo "| ArgoCD | 🔄 Restarting to register new cluster |" >> $GITHUB_STEP_SUMMARY
+          # Restart ArgoCD components to pick up new cluster secret
+          echo "| ArgoCD | 🔄 Restarting components |" >> $GITHUB_STEP_SUMMARY
+          
+          # Restart application controller (might be deployment or statefulset)
           kubectl rollout restart deployment argocd-application-controller -n argocd 2>/dev/null || \
             kubectl rollout restart statefulset argocd-application-controller -n argocd 2>/dev/null || true
+          
+          # Restart server
           kubectl rollout restart deployment argocd-server -n argocd 2>/dev/null || true
-          sleep 30
-          echo "| ArgoCD | ✅ Restarted |" >> $GITHUB_STEP_SUMMARY
+          
+          # Wait for restarts to complete
+          echo "Waiting for ArgoCD components to restart..."
+          kubectl rollout status deployment argocd-server -n argocd --timeout=120s 2>/dev/null || true
+          
+          sleep 10
+          echo "| ArgoCD | ✅ Components restarted |" >> $GITHUB_STEP_SUMMARY
+          
+          # Verify cluster is now recognized
+          echo ""
+          echo "Verifying cluster registration..."
+          kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=cluster -o json | \
+            jq -r '.items[] | "Cluster: \(.data.name | @base64d) -> Server: \(.data.server | @base64d)"'
 
       - name: Setup ArgoCD Repository (Public Repo - No Auth Needed)
         run: |
